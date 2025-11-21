@@ -160,7 +160,16 @@ export class VoiceService {
       console.log(`[Gemini STT] First 20 bytes: ${audioBuffer.subarray(0, 20).toString('hex')}`);
       console.log(`[Gemini STT] Audio appears to be ${isAllZeros ? 'SILENT (all zeros)' : 'non-silent'}`);
 
-      const model = this.genAI.getGenerativeModel({ model: 'gemini-2.5-flash' });
+      // Configure model with parameters to reduce hallucinations
+      const model = this.genAI.getGenerativeModel({
+        model: 'gemini-2.5-flash',
+        // generationConfig: {
+        //   temperature: 0.3,        // Very low temperature for accurate transcription
+        //   topK: 20,                // Limited options for more deterministic output
+        //   topP: 0.8,               // Conservative nucleus sampling
+        //   maxOutputTokens: 300,    // Reasonable limit for transcription
+        // },
+      });
 
       const audioPart = {
         inlineData: {
@@ -169,8 +178,18 @@ export class VoiceService {
         },
       };
 
-      // Direct transcription prompt with explicit instruction to ignore descriptions
-      const prompt = `Transcribe the speech in this audio file. Write only the words that are spoken by the person - do not describe sounds, noises, or audio quality. If you hear someone speaking, transcribe their words exactly.`;
+      // Direct transcription prompt with explicit instruction to prevent hallucinations
+      const prompt = `Transcribe the speech in this audio file.
+
+CRITICAL INSTRUCTIONS:
+- Write ONLY the exact words that are spoken by the person
+- Do NOT describe sounds, noises, background music, or audio quality
+- Do NOT add words or phrases that were not spoken
+- Do NOT invent or guess words if unclear - leave those parts out
+- If you cannot hear clear speech, return an empty response
+- Transcribe exactly what you hear, nothing more, nothing less
+
+Return only the transcription text with no additional commentary.`;
 
       console.log(`[Gemini STT] Sending to Gemini with MIME type: ${mimeType}`);
       const result = await model.generateContent([prompt, audioPart]);

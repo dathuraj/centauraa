@@ -2,7 +2,7 @@ import { Injectable } from '@nestjs/common';
 import { InjectRepository } from '@nestjs/typeorm';
 import { Repository } from 'typeorm';
 import { ConfigService } from '@nestjs/config';
-import { GoogleGenerativeAI } from '@google/generative-ai';
+import { GoogleGenerativeAI, HarmCategory, HarmBlockThreshold } from '@google/generative-ai';
 import { Conversation } from '../entities/conversation.entity';
 import { Message, SenderType } from '../entities/message.entity';
 import { User } from '../entities/user.entity';
@@ -72,7 +72,35 @@ export class ChatService {
 
     try {
       const genAI = new GoogleGenerativeAI(apiKey);
-      const model = genAI.getGenerativeModel({ model: 'gemini-2.5-flash' });
+
+      // Configure model with parameters to reduce hallucinations
+      const model = genAI.getGenerativeModel({
+        model: 'gemini-2.5-flash',
+        // generationConfig: {
+        //   temperature: 0.7,        // Lower temperature for more focused, accurate responses
+        //   topK: 40,                // Limit token selection to top 40 options
+        //   topP: 0.9,               // Nucleus sampling for balanced creativity
+        //   maxOutputTokens: 500,    // Limit response length for conciseness
+        // },
+        safetySettings: [
+          {
+            category: HarmCategory.HARM_CATEGORY_HARASSMENT,
+            threshold: HarmBlockThreshold.BLOCK_MEDIUM_AND_ABOVE,
+          },
+          {
+            category: HarmCategory.HARM_CATEGORY_HATE_SPEECH,
+            threshold: HarmBlockThreshold.BLOCK_MEDIUM_AND_ABOVE,
+          },
+          {
+            category: HarmCategory.HARM_CATEGORY_SEXUALLY_EXPLICIT,
+            threshold: HarmBlockThreshold.BLOCK_MEDIUM_AND_ABOVE,
+          },
+          {
+            category: HarmCategory.HARM_CATEGORY_DANGEROUS_CONTENT,
+            threshold: HarmBlockThreshold.BLOCK_MEDIUM_AND_ABOVE,
+          },
+        ],
+      });
 
       // Build conversation history
       const conversationHistory = this.buildConversationHistory(context.recentMessages);
@@ -130,15 +158,32 @@ export class ChatService {
     - Recent mood patterns: ${JSON.stringify(context.recentMoods)}
     - Preferences: ${JSON.stringify(context.preferences)}
 
-    Guidelines:
-    - Be empathetic, warm, and non-judgmental
-    - Be Concise
-    - Use CBT, DBT, and Psycho Dynamic techniques
-    - Offer supportive responses without providing medical advice
-    - Encourage professional help when appropriate
-    - Remember previous conversations and show continuity
-    - Use active listening techniques
-    - Validate feelings while offering gentle perspective`;
+    Core Guidelines:
+    - Address the person by their name (${context.userName}), not "Friend"
+    - Act as a compassionate, validating, and non-judgmental supporter
+    - Respond concisely (2-4 sentences maximum)
+    - Ask ONE reflective question at a time that encourages exploration of situations, outcomes, and actions
+    - Use Socratic-style questioning naturally without naming therapeutic techniques
+    - Draw from cognitive, behavioral, and psychodynamic principles subtly
+    - Frame thoughts constructively and avoid clinical jargon
+
+    // CRITICAL - To Prevent Hallucinations:
+    // - ONLY reference information explicitly provided in the user context above or the conversation history
+    // - DO NOT invent or assume facts about the user's life, relationships, work, or past events
+    // - DO NOT make specific claims about diagnoses, medications, or treatment plans
+    // - If you don't have information, acknowledge it: "I don't have details about that, but I'm here to explore it with you"
+    // - DO NOT fabricate previous conversations or events that aren't in the conversation history
+    // - Stay grounded in what the user has actually shared with you
+    // - When uncertain, ask clarifying questions instead of making assumptions
+
+    Response Boundaries:
+    - You are a supportive companion, NOT a licensed therapist
+    - Encourage professional help for crisis situations or serious mental health concerns
+    - Do not prescribe medications or provide medical diagnoses
+    - Focus on emotional support, reflection, and healthy coping strategies
+
+  // Remember: Base ALL responses strictly on the provided context and conversation history. Never fabricate details.
+  `;
   }
 
   private buildConversationHistory(messages: Message[]): string {
