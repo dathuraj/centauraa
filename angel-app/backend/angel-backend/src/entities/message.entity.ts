@@ -4,20 +4,23 @@ import {
   PrimaryGeneratedColumn,
   CreateDateColumn,
   ManyToOne,
+  Index,
 } from 'typeorm';
 import { Conversation } from './conversation.entity';
 
 export enum SenderType {
-  USER = 'user',
-  BOT = 'bot',
+  USER = 'USER',
+  BOT = 'BOT',
 }
 
 @Entity()
+@Index(['conversation', 'createdAt'])
 export class Message {
   @PrimaryGeneratedColumn('uuid')
   id: string;
 
   @ManyToOne(() => Conversation, (conversation) => conversation.messages)
+  @Index()
   conversation: Conversation;
 
   @Column({
@@ -30,5 +33,6 @@ export class Message {
   content: string;
 
   @CreateDateColumn()
+  @Index()
   createdAt: Date;
 }

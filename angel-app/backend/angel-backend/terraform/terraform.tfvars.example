@@ -1,0 +1,36 @@
+# AWS Configuration
+aws_region  = "us-west-2"
+environment = "dev"
+
+# VPC Configuration
+vpc_cidr             = "10.0.0.0/16"
+availability_zones   = ["us-west-2a", "us-west-2b"]
+public_subnet_cidrs  = ["10.0.1.0/24", "10.0.2.0/24"]
+private_subnet_cidrs = ["10.0.10.0/24", "10.0.11.0/24"]
+
+# RDS Configuration
+db_instance_class    = "db.t3.medium"
+db_allocated_storage = 100
+db_engine_version    = "18.1"
+db_name              = "angel_db"
+db_username          = "angel_user"
+db_password          = "CHANGE_ME_SECURE_PASSWORD"
+
+# EKS Configuration
+eks_cluster_version     = "1.28"
+eks_node_instance_types = ["t3.medium"]
+eks_node_desired_size   = 2
+eks_node_min_size       = 1
+eks_node_max_size       = 4
+
+# Application Configuration
+container_image = "your-ecr-registry/angel-backend"
+container_tag   = "latest"
+app_replicas    = 2
+
+# Secrets (Store these securely - use environment variables or AWS Secrets Manager)
+jwt_secret     = "your-jwt-secret-here"
+openai_api_key = "sk-..."
+gemini_api_key = "AIza..."
+mail_user      = "your-email@gmail.com"
+mail_pass      = "your-app-password"

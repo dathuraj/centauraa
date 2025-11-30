@@ -1,20 +1,20 @@
 import { Injectable } from '@nestjs/common';
 import { ConfigService } from '@nestjs/config';
-import { GoogleGenerativeAI } from '@google/generative-ai';
+import OpenAI from 'openai';
 import * as textToSpeech from '@google-cloud/text-to-speech';
 import * as speech from '@google-cloud/speech';
 
 @Injectable()
 export class VoiceService {
-  private genAI: GoogleGenerativeAI;
+  private openai: OpenAI;
   private ttsClient: textToSpeech.TextToSpeechClient;
   private speechClient: speech.SpeechClient;
 
   constructor(private configService: ConfigService) {
-    // Initialize Gemini for audio processing
-    const apiKey = this.configService.get('GEMINI_API_KEY');
+    // Initialize OpenAI for audio processing
+    const apiKey = this.configService.get('OPENAI_API_KEY');
     if (apiKey) {
-      this.genAI = new GoogleGenerativeAI(apiKey);
+      this.openai = new OpenAI({ apiKey });
     }
 
     // Initialize TTS client for audio responses
@@ -133,92 +133,74 @@ export class VoiceService {
   }
 
   /**
-   * Process audio directly with Gemini multimodal (audio to text transcription)
-   * Gemini handles various audio formats better than Speech-to-Text
+   * Process audio using OpenAI Whisper API (audio to text transcription)
+   * Whisper handles various audio formats and provides accurate transcription
    */
-  async processAudioWithGemini(audioBuffer: Buffer, mimeType: string = 'audio/wav'): Promise<string> {
+  async processAudioWithWhisper(audioBuffer: Buffer, mimeType: string = 'audio/wav'): Promise<string> {
     try {
-      if (!this.genAI) {
-        throw new Error('GEMINI_API_KEY not configured');
+      if (!this.openai) {
+        throw new Error('OPENAI_API_KEY not configured');
       }
 
-      console.log(`[Gemini STT] Processing audio - Format: ${mimeType}, Size: ${audioBuffer.length} bytes`);
+      console.log(`[Whisper STT] Processing audio - Format: ${mimeType}, Size: ${audioBuffer.length} bytes`);
 
       // Check if buffer is actually empty or too small
       if (audioBuffer.length < 100) {
-        console.error('[Gemini STT] Audio buffer is too small or empty');
+        console.error('[Whisper STT] Audio buffer is too small or empty');
         throw new Error('Audio file is too small or empty');
       }
 
       // Estimate audio duration (M4A/AAC is typically ~16KB per second at 128kbps)
       const estimatedDurationSeconds = audioBuffer.length / 16000;
-      console.log(`[Gemini STT] Estimated audio duration: ${estimatedDurationSeconds.toFixed(1)} seconds`);
+      console.log(`[Whisper STT] Estimated audio duration: ${estimatedDurationSeconds.toFixed(1)} seconds`);
 
       // Log first few bytes to verify it's not all zeros (silent audio)
       const sampleBytes = audioBuffer.subarray(0, Math.min(100, audioBuffer.length));
       const isAllZeros = sampleBytes.every(byte => byte === 0);
-      console.log(`[Gemini STT] First 20 bytes: ${audioBuffer.subarray(0, 20).toString('hex')}`);
-      console.log(`[Gemini STT] Audio appears to be ${isAllZeros ? 'SILENT (all zeros)' : 'non-silent'}`);
+      console.log(`[Whisper STT] First 20 bytes: ${audioBuffer.subarray(0, 20).toString('hex')}`);
+      console.log(`[Whisper STT] Audio appears to be ${isAllZeros ? 'SILENT (all zeros)' : 'non-silent'}`);
 
-      // Configure model with parameters to reduce hallucinations
-      const model = this.genAI.getGenerativeModel({
-        model: 'gemini-2.5-flash',
-        // generationConfig: {
-        //   temperature: 0.3,        // Very low temperature for accurate transcription
-        //   topK: 20,                // Limited options for more deterministic output
-        //   topP: 0.8,               // Conservative nucleus sampling
-        //   maxOutputTokens: 300,    // Reasonable limit for transcription
-        // },
-      });
-
-      const audioPart = {
-        inlineData: {
-          data: audioBuffer.toString('base64'),
-          mimeType: mimeType,
-        },
+      // Map MIME types to file extensions that Whisper expects
+      const extensionMap = {
+        'audio/wav': 'wav',
+        'audio/caf': 'wav',  // Treat CAF as WAV (similar PCM format)
+        'audio/mp3': 'mp3',
+        'audio/m4a': 'm4a',
+        'audio/flac': 'flac',
+        'audio/ogg': 'ogg',
+        'audio/webm': 'webm',
       };
 
-      // Direct transcription prompt with explicit instruction to prevent hallucinations
-      const prompt = `Transcribe the speech in this audio file.
+      const extension = extensionMap[mimeType] || 'wav';
 
-CRITICAL INSTRUCTIONS:
-- Write ONLY the exact words that are spoken by the person
-- Do NOT describe sounds, noises, background music, or audio quality
-- Do NOT add words or phrases that were not spoken
-- Do NOT invent or guess words if unclear - leave those parts out
-- If you cannot hear clear speech, return an empty response
-- Transcribe exactly what you hear, nothing more, nothing less
+      console.log(`[Whisper STT] Sending to Whisper with file type: ${extension}`);
 
-Return only the transcription text with no additional commentary.`;
+      // OpenAI Node.js SDK can work with buffers if we cast them properly
+      // Create a file-like object using the toFile helper or by casting
+      const fileData = audioBuffer as any;
+      fileData.name = `audio.${extension}`;
+      fileData.type = mimeType;
 
-      console.log(`[Gemini STT] Sending to Gemini with MIME type: ${mimeType}`);
-      const result = await model.generateContent([prompt, audioPart]);
-      const response = result.response;
-      const transcription = response.text().trim();
+      const transcription = await this.openai.audio.transcriptions.create({
+        file: fileData,
+        model: 'whisper-1',
+        language: 'en',
+        response_format: 'text',
+      });
 
-      console.log(`[Gemini STT] Raw response from Gemini: "${transcription}"`);
+      const result = transcription.trim();
 
-      // Check if Gemini is describing audio instead of transcribing
-      if (transcription.match(/\[(.*?)\]/) ||
-          transcription.toLowerCase().includes('hum') ||
-          transcription.toLowerCase().includes('tone') ||
-          transcription.toLowerCase().includes('no speech') ||
-          transcription.toLowerCase().includes('background noise')) {
-        console.warn('[Gemini STT] Gemini is describing audio characteristics instead of transcribing speech');
-        console.warn('[Gemini STT] This may indicate: poor audio quality, no speech present, or incompatible audio format');
+      console.log(`[Whisper STT] Transcription: "${result}"`);
+
+      if (result.length === 0) {
+        console.warn('[Whisper STT] Empty transcription returned');
         return '';
       }
 
-      if (transcription.length === 0) {
-        console.warn('[Gemini STT] Empty transcription returned');
-        return '';
-      }
-
-      console.log(`[Gemini STT] Transcription: "${transcription}"`);
-      return transcription;
+      return result;
     } catch (error) {
-      console.error('[Gemini STT] Error processing audio:', error);
-      throw new Error('Failed to process audio');
+      console.error('[Whisper STT] Error processing audio:', error);
+      throw new Error(`Failed to process audio: ${error.message}`);
     }
   }
 

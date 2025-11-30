@@ -24,7 +24,7 @@ export class VoiceController {
   ) {}
 
   /**
-   * Upload audio, transcribe it with Gemini, get AI response, and return both text and audio
+   * Upload audio, transcribe it with OpenAI Whisper, get AI response, and return both text and audio
    */
   @Post('message')
   @UseInterceptors(FileInterceptor('audio'))
@@ -45,8 +45,8 @@ export class VoiceController {
 
       console.log(`Processing audio file: ${mimeType}, size: ${file.size} bytes`);
 
-      // Transcribe audio to text using Gemini multimodal
-      const transcription = await this.voiceService.processAudioWithGemini(
+      // Transcribe audio to text using OpenAI Whisper
+      const transcription = await this.voiceService.processAudioWithWhisper(
         file.buffer,
         mimeType,
       );
@@ -133,7 +133,7 @@ export class VoiceController {
       }
 
       const mimeType = this.voiceService.detectMimeType(file.buffer);
-      const transcription = await this.voiceService.processAudioWithGemini(
+      const transcription = await this.voiceService.processAudioWithWhisper(
         file.buffer,
         mimeType,
       );
