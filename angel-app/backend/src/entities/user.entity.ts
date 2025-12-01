@@ -30,6 +30,12 @@ export class User {
   @Column({ default: false })
   isVerified: boolean;
 
+  @Column({ type: 'text', nullable: true })
+  conversationContext: string;
+
+  @Column({ type: 'timestamp', nullable: true })
+  contextUpdatedAt: Date;
+
   @CreateDateColumn()
   createdAt: Date;
 

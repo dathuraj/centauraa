@@ -1,4 +1,4 @@
-import { Injectable, Inject } from '@nestjs/common';
+import { Injectable, Inject, Logger } from '@nestjs/common';
 import { InjectRepository } from '@nestjs/typeorm';
 import { Repository } from 'typeorm';
 import { ConfigService } from '@nestjs/config';
@@ -12,9 +12,11 @@ import { User } from '../entities/user.entity';
 import { UserPreference } from '../entities/user-preference.entity';
 import { MoodLog } from '../entities/mood-log.entity';
 import { RAGService, RAGResult } from './rag.service';
+import { ANGEL_CORE_GUIDELINES, ANGEL_ROLE_DESCRIPTION, RAG_INSTRUCTION } from '../prompts/angel-system-prompt';
 
 @Injectable()
 export class ChatService {
+  private readonly logger = new Logger(ChatService.name);
   private openai: OpenAI;
   private gemini: GoogleGenerativeAI;
   private aiProvider: 'openai' | 'gemini';
@@ -57,6 +59,14 @@ export class ChatService {
 
     if (!user) {
       throw new Error('User not found');
+    }
+
+    // Check if we need to update user context (once per day on first conversation)
+    if (this.shouldUpdateContext(user)) {
+      // Generate context asynchronously without blocking the message flow
+      this.generateUserContext(user).catch(err =>
+        this.logger.error('Failed to generate user context:', err)
+      );
     }
 
     let conversation = await this.conversationRepository.findOne({
@@ -140,41 +150,45 @@ export class ChatService {
     }
 
     try {
-      // Build conversation history for OpenAI format
+      // Build messages for OpenAI format (no conversation history, using conversationContext instead)
       const messages: OpenAI.Chat.ChatCompletionMessageParam[] = [
         {
           role: 'system',
           content: systemPrompt,
         },
+        {
+          role: 'user',
+          content: message,
+        },
       ];
-
-      // Add conversation history
-      if (context.recentMessages && context.recentMessages.length > 0) {
-        context.recentMessages.forEach((msg: Message) => {
-          messages.push({
-            role: msg.senderType === SenderType.USER ? 'user' : 'assistant',
-            content: msg.content,
-          });
-        });
-      }
-
-      // Add current user message
-      messages.push({
-        role: 'user',
-        content: message,
-      });
 
       const startTime = Date.now();
       const model = this.configService.get('OPENAI_MODEL', 'gpt-4o-mini');
+
+      // Log the full prompt for debugging
+      this.logger.log('\n=== OpenAI Prompt Log ===');
+      this.logger.log(`Model: ${model}`);
+      this.logger.log(`Timestamp: ${new Date().toISOString()}`);
+      this.logger.log('\nMessages:');
+      messages.forEach((msg, idx) => {
+        this.logger.log(`\n[${idx}] Role: ${msg.role}`);
+        this.logger.log(`Content: ${typeof msg.content === 'string' ? msg.content : JSON.stringify(msg.content)}`);
+      });
+      this.logger.log('\n========================\n');
+
       const completion = await this.openai.chat.completions.create({
         model,
         messages: messages,
         temperature: 0.7,
         max_tokens: 500,
       });
-      console.log(`OpenAI (${model}) API call took ${Date.now() - startTime}ms`);
 
-      return completion.choices[0].message.content || "I'm here to support you. Can you tell me more?";
+      const responseContent = completion.choices[0].message.content || "I'm here to support you. Can you tell me more?";
+
+      this.logger.log(`OpenAI (${model}) API call took ${Date.now() - startTime}ms`);
+      this.logger.log(`\n=== OpenAI Response ===\n${responseContent}\n=====================\n`);
+
+      return responseContent;
     } catch (error) {
       console.error('Error generating OpenAI response:', error);
       return "I'm here to support you. I'm having a moment of difficulty, but I'm listening. Can you tell me more about how you're feeling?";
@@ -198,34 +212,34 @@ export class ChatService {
         },
       });
 
-      // Build conversation history for Gemini format
-      const history: Array<{ role: string; parts: Array<{ text: string }> }> = [];
-
-      // Add recent messages as history
-      if (context.recentMessages && context.recentMessages.length > 0) {
-        context.recentMessages.forEach((msg: Message) => {
-          history.push({
-            role: msg.senderType === SenderType.USER ? 'user' : 'model',
-            parts: [{ text: msg.content }],
-          });
-        });
-      }
-
-      // Start chat with history
+      // Start chat without history (using conversationContext instead)
       const chat = genModel.startChat({
-        history,
         generationConfig: {
           temperature: 0.7,
           maxOutputTokens: 500,
         },
       });
 
+      // Log the full prompt for debugging
+      this.logger.log('\n=== Gemini Prompt Log ===');
+      this.logger.log(`Model: ${model}`);
+      this.logger.log(`Timestamp: ${new Date().toISOString()}`);
+      this.logger.log('\nSystem Instruction:');
+      this.logger.log(systemPrompt);
+      this.logger.log('\nCurrent Message:');
+      this.logger.log(message);
+      this.logger.log('\n========================\n');
+
       const startTime = Date.now();
       const result = await chat.sendMessage(message);
       const response = result.response;
-      console.log(`Gemini (${model}) API call took ${Date.now() - startTime}ms`);
 
-      return response.text() || "I'm here to support you. Can you tell me more?";
+      const responseText = response.text() || "I'm here to support you. Can you tell me more?";
+
+      this.logger.log(`Gemini (${model}) API call took ${Date.now() - startTime}ms`);
+      this.logger.log(`\n=== Gemini Response ===\n${responseText}\n=====================\n`);
+
+      return responseText;
     } catch (error: any) {
       console.error('Error generating Gemini response:', error);
       if (error.errorDetails) {
@@ -267,6 +281,7 @@ export class ChatService {
 
     const context = {
       userName: user.name || 'Friend',
+      conversationContext: user.conversationContext || null,
       preferences: preferences.reduce((acc, pref) => {
         acc[pref.key] = pref.value;
         return acc;
@@ -287,7 +302,7 @@ export class ChatService {
   }
 
   private buildSystemPrompt(context: any, ragContext?: string): string {
-    let prompt = `You are Angel, a compassionate and supportive AI mental health companion.
+    let prompt = `${ANGEL_ROLE_DESCRIPTION}
 
     User Context:
     - Name: ${context.userName}
@@ -295,32 +310,18 @@ export class ChatService {
     - Preferences: ${JSON.stringify(context.preferences)}
 `;
 
+    // Add user's conversation context if available
+    if (context.conversationContext) {
+      prompt += `    - Background: ${context.conversationContext}\n`;
+    }
+
     // Add RAG context if available
     if (ragContext && ragContext.trim().length > 0) {
       prompt += `\n${ragContext}\n`;
-      prompt += `\nIMPORTANT: Use the relevant context from past conversations above to provide continuity and recall important details the user has shared. Reference specific past topics naturally when relevant to the current conversation.\n`;
+      prompt += RAG_INSTRUCTION;
     }
 
-    prompt += `
-Core Guidelines:
-You are a compassionate, curious, and non-judgmental conversational partner who helps the user think clearly about their situation.
-Respond concisely and ask only one thoughtful question at a time.
-Your questions should:
-Explore the situation, context, choices, and consequences—not just feelings.
-Encourage reflection and new perspectives through gentle, curious inquiry.
-Stay specific to what the user just said.
-Help the user reason about events, actions, patterns, and next steps.
-Your style should:
-Draw naturally from cognitive, behavioral, and psychodynamic principles without naming them.
-Use gentle Socratic questioning without calling it that.
-Maintain continuity by remembering all previous conversation context.
-Memory Priority: Prioritize the immediate content of the user's last message over past detailed conversations. Only reference old topics (like the app) if the user's current statement directly relates to them. When the user introduces a new topic (like "excited about life"), follow the new topic fully.
-Avoid focusing on emotions unless the user brings them up.
-Avoid discussing body sensations unless the user initiates it.
-Frame thoughts constructively and support the user’s sense of agency.
-Your goal is to help the user understand their situation and find clarity about what matters, what's possible, and what they want to do next.
-
-`;
+    prompt += ANGEL_CORE_GUIDELINES;
     return prompt;
   }
 
@@ -371,5 +372,107 @@ Your goal is to help the user understand their situation and find clarity about 
     ];
 
     await Promise.all(keys.map(key => this.cacheManager.del(key)));
+  }
+
+  // Check if user context needs updating (once per day)
+  private shouldUpdateContext(user: User): boolean {
+    if (!user.contextUpdatedAt) {
+      return true; // Never been updated
+    }
+
+    const lastUpdate = new Date(user.contextUpdatedAt);
+    const now = new Date();
+    const hoursSinceUpdate = (now.getTime() - lastUpdate.getTime()) / (1000 * 60 * 60);
+
+    return hoursSinceUpdate >= 24; // Update once per day
+  }
+
+  // Generate user context summary using LLM
+  async generateUserContext(user: User): Promise<void> {
+    try {
+      this.logger.log(`Generating conversation context for user ${user.id}`);
+
+      // Get all conversation history for the user (last 50 messages)
+      const messages = await this.messageRepository.find({
+        where: { conversation: { user: { id: user.id } } },
+        order: { createdAt: 'DESC' },
+        take: 50,
+      });
+
+      if (messages.length === 0) {
+        this.logger.log('No messages found, skipping context generation');
+        return;
+      }
+
+      // Build conversation history (only user messages)
+      const userMessages = messages
+        .filter(msg => msg.senderType === SenderType.USER)
+        .reverse();
+
+      if (userMessages.length === 0) {
+        this.logger.log('No user messages found, skipping context generation');
+        return;
+      }
+
+      const conversationHistory = userMessages
+        .map((msg, idx) => `[${idx + 1}] ${msg.content}`)
+        .join('\n\n');
+
+      // Create prompt for LLM to generate context
+      const contextPrompt = `Based on the following user messages from conversation history, create a concise summary (2-3 paragraphs) about this user. Include:
+1. Key themes and topics they've discussed
+2. Important life situations, challenges, or goals mentioned
+3. Relevant background information that would help provide better support
+
+Note: These are only the user's messages, not the full conversation.
+
+User Messages:
+${conversationHistory}
+
+Generate a comprehensive but concise summary:`;
+
+      let contextSummary = '';
+
+      // Use the configured AI provider to generate context
+      if (this.aiProvider === 'gemini' && this.gemini) {
+        const model = this.gemini.getGenerativeModel({
+          model: this.configService.get('GEMINI_MODEL', 'gemini-1.5-flash'),
+        });
+
+        const result = await model.generateContent(contextPrompt);
+        contextSummary = result.response.text();
+      } else if (this.openai) {
+        const completion = await this.openai.chat.completions.create({
+          model: this.configService.get('OPENAI_MODEL', 'gpt-4o-mini'),
+          messages: [
+            {
+              role: 'system',
+              content: 'You are a helpful assistant that creates concise user summaries from conversation history.',
+            },
+            {
+              role: 'user',
+              content: contextPrompt,
+            },
+          ],
+          temperature: 0.5,
+          max_tokens: 500,
+        });
+
+        contextSummary = completion.choices[0].message.content || '';
+      }
+
+      // Update user's conversation context
+      if (contextSummary) {
+        user.conversationContext = contextSummary;
+        user.contextUpdatedAt = new Date();
+        await this.userRepository.save(user);
+
+        this.logger.log(`Context generated and saved for user ${user.id}`);
+        this.logger.log(`Generated Context:\n${contextSummary}`);
+      }
+    } catch (error) {
+      this.logger.error('Error generating user context:', error);
+      // Don't throw - context generation should not block the chat
+    }
   }
 }
