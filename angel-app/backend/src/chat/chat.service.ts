@@ -12,7 +12,7 @@ import { User } from '../entities/user.entity';
 import { UserPreference } from '../entities/user-preference.entity';
 import { MoodLog } from '../entities/mood-log.entity';
 import { RAGService, RAGResult } from './rag.service';
-import angelPrompts from '../prompts/angel-system-prompt.json';
+import { PromptsService } from '../prompts/prompts.service';
 
 @Injectable()
 export class ChatService {
@@ -34,6 +34,7 @@ export class ChatService {
     private moodLogRepository: Repository<MoodLog>,
     private configService: ConfigService,
     private ragService: RAGService,
+    private promptsService: PromptsService,
     @Inject(CACHE_MANAGER) private cacheManager: Cache,
   ) {
     // Get AI provider from config
@@ -307,6 +308,8 @@ export class ChatService {
   }
 
   private buildSystemPrompt(context: any, ragContext?: string): string {
+    const angelPrompts = this.promptsService.getPrompts();
+
     let prompt = `${angelPrompts.angelRoleDescription}
 
     User Context:

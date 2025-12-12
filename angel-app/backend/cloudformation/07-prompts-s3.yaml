@@ -1,0 +1,78 @@
+AWSTemplateFormatVersion: '2010-09-09'
+Description: 'S3 Bucket for storing Angel system prompts and configurations'
+
+Parameters:
+  ProjectName:
+    Type: String
+    Default: angel-backend
+    Description: Project name for resource naming
+
+  Environment:
+    Type: String
+    Default: dev
+    AllowedValues:
+      - dev
+      - staging
+      - prod
+    Description: Environment name
+
+Resources:
+  # S3 Bucket for Prompts
+  PromptsBucket:
+    Type: AWS::S3::Bucket
+    Properties:
+      BucketName: !Sub '${ProjectName}-${Environment}-prompts'
+      BucketEncryption:
+        ServerSideEncryptionConfiguration:
+          - ServerSideEncryptionByDefault:
+              SSEAlgorithm: AES256
+      VersioningConfiguration:
+        Status: Enabled
+      PublicAccessBlockConfiguration:
+        BlockPublicAcls: true
+        BlockPublicPolicy: true
+        IgnorePublicAcls: true
+        RestrictPublicBuckets: true
+      LifecycleConfiguration:
+        Rules:
+          - Id: DeleteOldVersions
+            Status: Enabled
+            NoncurrentVersionExpirationInDays: 30
+      Tags:
+        - Key: Name
+          Value: !Sub '${ProjectName}-${Environment}-prompts'
+        - Key: Environment
+          Value: !Ref Environment
+
+  # Bucket Policy - Allow ECS Task Role to read
+  PromptsBucketPolicy:
+    Type: AWS::S3::BucketPolicy
+    Properties:
+      Bucket: !Ref PromptsBucket
+      PolicyDocument:
+        Version: '2012-10-17'
+        Statement:
+          - Sid: AllowECSTaskRoleRead
+            Effect: Allow
+            Principal:
+              AWS:
+                Fn::ImportValue: !Sub '${ProjectName}-${Environment}-TaskRoleArn'
+            Action:
+              - s3:GetObject
+              - s3:ListBucket
+            Resource:
+              - !GetAtt PromptsBucket.Arn
+              - !Sub '${PromptsBucket.Arn}/*'
+
+Outputs:
+  PromptsBucketName:
+    Description: Name of the S3 bucket for prompts
+    Value: !Ref PromptsBucket
+    Export:
+      Name: !Sub '${ProjectName}-${Environment}-PromptsBucketName'
+
+  PromptsBucketArn:
+    Description: ARN of the S3 bucket for prompts
+    Value: !GetAtt PromptsBucket.Arn
+    Export:
+      Name: !Sub '${ProjectName}-${Environment}-PromptsBucketArn'

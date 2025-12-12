@@ -131,14 +131,14 @@ fi
 echo -e "${GREEN}Starting deployment...${NC}\n"
 
 # 1. Deploy VPC
-echo -e "${YELLOW}[1/6] Deploying VPC and Networking...${NC}"
+echo -e "${YELLOW}[1/9] Deploying VPC and Networking...${NC}"
 update_or_create_stack \
     "${PROJECT_NAME}-${ENVIRONMENT}-vpc" \
     "01-vpc.yaml" \
     "ParameterKey=ProjectName,ParameterValue=${PROJECT_NAME} ParameterKey=Environment,ParameterValue=${ENVIRONMENT}"
 
 # 2. Deploy ECS Cluster
-echo -e "${YELLOW}[2/6] Deploying ECS Cluster...${NC}"
+echo -e "${YELLOW}[2/9] Deploying ECS Cluster...${NC}"
 update_or_create_stack \
     "${PROJECT_NAME}-${ENVIRONMENT}-ecs-cluster" \
     "02-ecs-cluster.yaml" \
@@ -146,32 +146,55 @@ update_or_create_stack \
     "CAPABILITY_NAMED_IAM"
 
 # 3. Deploy RDS
-echo -e "${YELLOW}[3/6] Deploying RDS PostgreSQL...${NC}"
+echo -e "${YELLOW}[3/9] Deploying RDS PostgreSQL...${NC}"
 update_or_create_stack \
     "${PROJECT_NAME}-${ENVIRONMENT}-rds" \
     "03-rds.yaml" \
     "ParameterKey=ProjectName,ParameterValue=${PROJECT_NAME} ParameterKey=Environment,ParameterValue=${ENVIRONMENT} ParameterKey=DBPassword,ParameterValue=${DB_PASSWORD}"
 
 # 4. Deploy ALB
-echo -e "${YELLOW}[4/6] Deploying Application Load Balancer...${NC}"
+echo -e "${YELLOW}[4/9] Deploying Application Load Balancer...${NC}"
 update_or_create_stack \
     "${PROJECT_NAME}-${ENVIRONMENT}-alb" \
     "04-alb.yaml" \
     "ParameterKey=ProjectName,ParameterValue=${PROJECT_NAME} ParameterKey=Environment,ParameterValue=${ENVIRONMENT}"
 
-# 5. Deploy Weaviate
-echo -e "${YELLOW}[5/6] Deploying Weaviate Service...${NC}"
+# 5. Deploy S3 Bucket for Prompts
+echo -e "${YELLOW}[5/9] Deploying S3 Bucket for Prompts...${NC}"
+update_or_create_stack \
+    "${PROJECT_NAME}-${ENVIRONMENT}-prompts" \
+    "07-prompts-s3.yaml" \
+    "ParameterKey=ProjectName,ParameterValue=${PROJECT_NAME} ParameterKey=Environment,ParameterValue=${ENVIRONMENT}"
+
+# 6. Deploy Weaviate
+echo -e "${YELLOW}[6/9] Deploying Weaviate Service...${NC}"
 update_or_create_stack \
     "${PROJECT_NAME}-${ENVIRONMENT}-weaviate" \
     "05-weaviate-service.yaml" \
     "ParameterKey=ProjectName,ParameterValue=${PROJECT_NAME} ParameterKey=Environment,ParameterValue=${ENVIRONMENT} ParameterKey=WeaviateAPIKey,ParameterValue=${WEAVIATE_API_KEY}"
 
-# 6. Deploy Backend
-echo -e "${YELLOW}[6/6] Deploying Backend Service...${NC}"
+# 7. Deploy Backend
+echo -e "${YELLOW}[7/9] Deploying Backend Service...${NC}"
 update_or_create_stack \
     "${PROJECT_NAME}-${ENVIRONMENT}-backend" \
     "06-backend-service.yaml" \
     "ParameterKey=ProjectName,ParameterValue=${PROJECT_NAME} ParameterKey=Environment,ParameterValue=${ENVIRONMENT} ParameterKey=BackendImage,ParameterValue=${BACKEND_IMAGE} ParameterKey=JWTSecret,ParameterValue=${JWT_SECRET} ParameterKey=OpenAIAPIKey,ParameterValue=${OPENAI_API_KEY} ParameterKey=GeminiAPIKey,ParameterValue=${GEMINI_API_KEY} ParameterKey=MailUser,ParameterValue=${MAIL_USER} ParameterKey=MailPass,ParameterValue=${MAIL_PASS} ParameterKey=WeaviateAPIKey,ParameterValue=${WEAVIATE_API_KEY}"
+
+# 8. Deploy Lambda Function for ECS Restart
+echo -e "${YELLOW}[8/9] Deploying Lambda Function for Auto-Restart...${NC}"
+update_or_create_stack \
+    "${PROJECT_NAME}-${ENVIRONMENT}-prompts-lambda" \
+    "08-prompts-lambda.yaml" \
+    "ParameterKey=ProjectName,ParameterValue=${PROJECT_NAME} ParameterKey=Environment,ParameterValue=${ENVIRONMENT}" \
+    "CAPABILITY_NAMED_IAM"
+
+# 9. Configure S3 Event Notification
+echo -e "${YELLOW}[9/9] Configuring S3 Event Notification...${NC}"
+update_or_create_stack \
+    "${PROJECT_NAME}-${ENVIRONMENT}-s3-notification" \
+    "09-s3-event-notification.yaml" \
+    "ParameterKey=ProjectName,ParameterValue=${PROJECT_NAME} ParameterKey=Environment,ParameterValue=${ENVIRONMENT}" \
+    "CAPABILITY_NAMED_IAM"
 
 # Get ALB URL
 echo -e "\n${GREEN}=== Deployment Complete! ===${NC}\n"
@@ -197,6 +220,11 @@ echo -e "${YELLOW}Note: It may take 2-3 minutes for services to become healthy${
 echo -e "${YELLOW}Backend is accessible via Application Load Balancer${NC}"
 echo -e "${YELLOW}Weaviate is internal-only (accessible via service discovery)${NC}\n"
 
+echo -e "${GREEN}✅ Auto-restart Lambda configured:${NC}"
+echo -e "  When you upload prompts to S3, the backend service will automatically restart"
+echo -e "  Upload prompts: ./scripts/upload-prompts-to-s3.sh ${ENVIRONMENT}\n"
+
 echo -e "${YELLOW}Check CloudWatch Logs for any issues:${NC}"
 echo -e "  aws logs tail /ecs/${PROJECT_NAME}-${ENVIRONMENT}/backend --follow --region ${AWS_REGION}"
-echo -e "  aws logs tail /ecs/${PROJECT_NAME}-${ENVIRONMENT}/weaviate --follow --region ${AWS_REGION}\n"
+echo -e "  aws logs tail /ecs/${PROJECT_NAME}-${ENVIRONMENT}/weaviate --follow --region ${AWS_REGION}"
+echo -e "  aws logs tail /aws/lambda/${PROJECT_NAME}-${ENVIRONMENT}-restart-ecs-service --follow --region ${AWS_REGION}\n"

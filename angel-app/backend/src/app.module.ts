@@ -10,6 +10,7 @@ import { ChatModule } from './chat/chat.module';
 import { MoodModule } from './mood/mood.module';
 import { MailModule } from './mail/mail.module';
 import { WeaviateModule } from './weaviate/weaviate.module';
+import { PromptsModule } from './prompts/prompts.module';
 import { getDatabaseConfig } from './config/database.config';
 import { WeaviateConfigService } from './config/weaviate.config';
 
@@ -26,6 +27,7 @@ import { WeaviateConfigService } from './config/weaviate.config';
     }),
     ScheduleModule.forRoot(),
     WeaviateModule,
+    PromptsModule,
     AuthModule,
     UsersModule,
     ChatModule,

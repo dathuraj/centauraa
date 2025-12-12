@@ -232,6 +232,10 @@ export class VoiceService {
       return Buffer.from(response.audioContent as Uint8Array);
     } catch (error) {
       console.error('Error in text-to-speech:', error);
+      // If it's the "No audio content received" error, re-throw it as-is
+      if (error.message === 'No audio content received') {
+        throw error;
+      }
       throw new Error('Failed to synthesize speech');
     }
   }

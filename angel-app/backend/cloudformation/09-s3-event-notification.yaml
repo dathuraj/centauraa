@@ -1,0 +1,153 @@
+AWSTemplateFormatVersion: '2010-09-09'
+Description: 'S3 Event Notification to trigger Lambda when prompts are updated'
+
+Parameters:
+  ProjectName:
+    Type: String
+    Default: angel-backend
+    Description: Project name for resource naming
+
+  Environment:
+    Type: String
+    Default: dev
+    AllowedValues:
+      - dev
+      - staging
+      - prod
+    Description: Environment name
+
+Resources:
+  # Custom Resource to add S3 notification configuration
+  # This is needed because we can't add notification to an existing bucket in the same template
+  S3NotificationCustomResource:
+    Type: Custom::S3Notification
+    Properties:
+      ServiceToken: !GetAtt S3NotificationFunction.Arn
+      BucketName:
+        Fn::ImportValue: !Sub '${ProjectName}-${Environment}-PromptsBucketName'
+      LambdaFunctionArn:
+        Fn::ImportValue: !Sub '${ProjectName}-${Environment}-RestartECSLambdaArn'
+      NotificationId: !Sub '${ProjectName}-${Environment}-prompts-notification'
+
+  # Lambda function to manage S3 notification configuration
+  S3NotificationFunction:
+    Type: AWS::Lambda::Function
+    Properties:
+      FunctionName: !Sub '${ProjectName}-${Environment}-s3-notification-handler'
+      Description: Manages S3 bucket notification configuration
+      Runtime: python3.11
+      Handler: index.lambda_handler
+      Role: !GetAtt S3NotificationFunctionRole.Arn
+      Timeout: 60
+      Code:
+        ZipFile: |
+          import json
+          import boto3
+          import cfnresponse
+
+          s3 = boto3.client('s3')
+
+          def lambda_handler(event, context):
+              print(f"Event: {json.dumps(event)}")
+
+              try:
+                  bucket_name = event['ResourceProperties']['BucketName']
+                  lambda_arn = event['ResourceProperties']['LambdaFunctionArn']
+                  notification_id = event['ResourceProperties']['NotificationId']
+                  request_type = event['RequestType']
+
+                  if request_type == 'Delete':
+                      # Remove notification configuration
+                      print(f"Removing notification from bucket: {bucket_name}")
+                      response = s3.get_bucket_notification_configuration(Bucket=bucket_name)
+
+                      # Remove our specific notification
+                      lambda_configs = response.get('LambdaFunctionConfigurations', [])
+                      lambda_configs = [c for c in lambda_configs if c.get('Id') != notification_id]
+
+                      s3.put_bucket_notification_configuration(
+                          Bucket=bucket_name,
+                          NotificationConfiguration={'LambdaFunctionConfigurations': lambda_configs}
+                      )
+                      cfnresponse.send(event, context, cfnresponse.SUCCESS, {})
+                      return
+
+                  # Create or Update notification configuration
+                  print(f"Adding notification to bucket: {bucket_name}")
+
+                  # Get existing notification configuration
+                  try:
+                      response = s3.get_bucket_notification_configuration(Bucket=bucket_name)
+                      lambda_configs = response.get('LambdaFunctionConfigurations', [])
+                  except:
+                      lambda_configs = []
+
+                  # Remove any existing config with same ID
+                  lambda_configs = [c for c in lambda_configs if c.get('Id') != notification_id]
+
+                  # Add new notification configuration
+                  lambda_configs.append({
+                      'Id': notification_id,
+                      'LambdaFunctionArn': lambda_arn,
+                      'Events': ['s3:ObjectCreated:*'],
+                      'Filter': {
+                          'Key': {
+                              'FilterRules': [
+                                  {
+                                      'Name': 'suffix',
+                                      'Value': '.json'
+                                  }
+                              ]
+                          }
+                      }
+                  })
+
+                  # Update bucket notification configuration
+                  s3.put_bucket_notification_configuration(
+                      Bucket=bucket_name,
+                      NotificationConfiguration={
+                          'LambdaFunctionConfigurations': lambda_configs
+                      }
+                  )
+
+                  print(f"Notification added successfully")
+                  cfnresponse.send(event, context, cfnresponse.SUCCESS, {
+                      'Message': 'S3 notification configured successfully'
+                  })
+
+              except Exception as e:
+                  print(f"Error: {str(e)}")
+                  cfnresponse.send(event, context, cfnresponse.FAILED, {
+                      'Message': str(e)
+                  })
+
+  # IAM Role for the custom resource Lambda
+  S3NotificationFunctionRole:
+    Type: AWS::IAM::Role
+    Properties:
+      RoleName: !Sub '${ProjectName}-${Environment}-s3-notification-handler'
+      AssumeRolePolicyDocument:
+        Version: '2012-10-17'
+        Statement:
+          - Effect: Allow
+            Principal:
+              Service: lambda.amazonaws.com
+            Action: sts:AssumeRole
+      ManagedPolicyArns:
+        - arn:aws:iam::aws:policy/service-role/AWSLambdaBasicExecutionRole
+      Policies:
+        - PolicyName: S3NotificationPolicy
+          PolicyDocument:
+            Version: '2012-10-17'
+            Statement:
+              - Effect: Allow
+                Action:
+                  - s3:GetBucketNotification
+                  - s3:PutBucketNotification
+                Resource:
+                  - Fn::ImportValue: !Sub '${ProjectName}-${Environment}-PromptsBucketArn'
+
+Outputs:
+  NotificationConfigured:
+    Description: S3 notification configuration status
+    Value: !Ref S3NotificationCustomResource

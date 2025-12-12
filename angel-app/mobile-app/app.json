@@ -19,7 +19,16 @@
       "bundleIdentifier": "com.centauraa.angelapp",
       "buildNumber": "1",
       "infoPlist": {
-        "NSMicrophoneUsageDescription": "AngelApp needs access to your microphone to enable voice conversations with your AI assistant."
+        "NSMicrophoneUsageDescription": "AngelApp needs access to your microphone to enable voice conversations with your AI assistant.",
+        "NSAppTransportSecurity": {
+          "NSExceptionDomains": {
+            "angel-backend-dev-alb-448499488.us-west-2.elb.amazonaws.com": {
+              "NSExceptionAllowsInsecureHTTPLoads": true,
+              "NSIncludesSubdomains": true
+            }
+          },
+          "NSAllowsLocalNetworking": true
+        }
       }
     },
     "android": {

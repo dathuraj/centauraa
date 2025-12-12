@@ -180,6 +180,13 @@ Resources:
               Value: 'http'
             - Name: WEAVIATE_HOST
               Value: !Sub 'weaviate.${ProjectName}-${Environment}.local:8080'
+            - Name: PROMPTS_S3_BUCKET
+              Value:
+                Fn::ImportValue: !Sub '${ProjectName}-${Environment}-PromptsBucketName'
+            - Name: PROMPTS_S3_KEY
+              Value: 'angel-system-prompt.json'
+            - Name: AWS_REGION
+              Value: !Ref AWS::Region
             - Name: DATABASE_HOST
               Value:
                 Fn::ImportValue: !Sub '${ProjectName}-${Environment}-DBEndpoint'
