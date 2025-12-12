@@ -1,4 +1,4 @@
-import { Module } from '@nestjs/common';
+import { Module, OnModuleInit } from '@nestjs/common';
 import { ConfigModule, ConfigService } from '@nestjs/config';
 import { TypeOrmModule } from '@nestjs/typeorm';
 import { ScheduleModule } from '@nestjs/schedule';
@@ -9,7 +9,9 @@ import { UsersModule } from './users/users.module';
 import { ChatModule } from './chat/chat.module';
 import { MoodModule } from './mood/mood.module';
 import { MailModule } from './mail/mail.module';
+import { WeaviateModule } from './weaviate/weaviate.module';
 import { getDatabaseConfig } from './config/database.config';
+import { WeaviateConfigService } from './config/weaviate.config';
 
 @Module({
   imports: [
@@ -23,6 +25,7 @@ import { getDatabaseConfig } from './config/database.config';
       inject: [ConfigService],
     }),
     ScheduleModule.forRoot(),
+    WeaviateModule,
     AuthModule,
     UsersModule,
     ChatModule,
@@ -32,4 +35,12 @@ import { getDatabaseConfig } from './config/database.config';
   controllers: [AppController],
   providers: [AppService],
 })
-export class AppModule {}
+export class AppModule implements OnModuleInit {
+  constructor(private weaviateConfig: WeaviateConfigService) {}
+
+  async onModuleInit() {
+    // Initialize Weaviate schema on application startup
+    await this.weaviateConfig.initializeSchema();
+    console.log('Weaviate initialized successfully');
+  }
+}

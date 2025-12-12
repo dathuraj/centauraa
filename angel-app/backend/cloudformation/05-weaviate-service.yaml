@@ -1,0 +1,271 @@
+AWSTemplateFormatVersion: '2010-09-09'
+Description: 'Weaviate Vector Database ECS Fargate Service'
+
+Parameters:
+  ProjectName:
+    Type: String
+    Default: angel-backend
+    Description: Project name for resource naming
+
+  Environment:
+    Type: String
+    Default: dev
+    AllowedValues:
+      - dev
+      - staging
+      - prod
+    Description: Environment name
+
+  WeaviateImage:
+    Type: String
+    Default: '914463738745.dkr.ecr.us-west-2.amazonaws.com/weaviate:1.27.8'
+    Description: Weaviate Docker image from ECR
+
+  WeaviateAPIKey:
+    Type: String
+    Description: Weaviate API key for authentication
+    NoEcho: true
+
+  TaskCPU:
+    Type: String
+    Default: '1024'
+    AllowedValues:
+      - '256'
+      - '512'
+      - '1024'
+      - '2048'
+      - '4096'
+    Description: Task CPU units (1024 = 1 vCPU)
+
+  TaskMemory:
+    Type: String
+    Default: '2048'
+    AllowedValues:
+      - '512'
+      - '1024'
+      - '2048'
+      - '3072'
+      - '4096'
+      - '8192'
+    Description: Task memory in MB
+
+  DesiredCount:
+    Type: Number
+    Default: 1
+    Description: Desired number of tasks
+
+Resources:
+  # EFS File System for Weaviate data persistence
+  WeaviateEFS:
+    Type: AWS::EFS::FileSystem
+    Properties:
+      Encrypted: true
+      PerformanceMode: generalPurpose
+      ThroughputMode: bursting
+      FileSystemTags:
+        - Key: Name
+          Value: !Sub '${ProjectName}-${Environment}-weaviate-efs'
+
+  # EFS Mount Targets
+  EFSMountTarget1:
+    Type: AWS::EFS::MountTarget
+    Properties:
+      FileSystemId: !Ref WeaviateEFS
+      SubnetId:
+        Fn::ImportValue: !Sub '${ProjectName}-${Environment}-PrivateSubnet1'
+      SecurityGroups:
+        - !Ref EFSSecurityGroup
+
+  EFSMountTarget2:
+    Type: AWS::EFS::MountTarget
+    Properties:
+      FileSystemId: !Ref WeaviateEFS
+      SubnetId:
+        Fn::ImportValue: !Sub '${ProjectName}-${Environment}-PrivateSubnet2'
+      SecurityGroups:
+        - !Ref EFSSecurityGroup
+
+  # Security Group for EFS
+  EFSSecurityGroup:
+    Type: AWS::EC2::SecurityGroup
+    Properties:
+      GroupName: !Sub '${ProjectName}-${Environment}-weaviate-efs-sg'
+      GroupDescription: Security group for Weaviate EFS
+      VpcId:
+        Fn::ImportValue: !Sub '${ProjectName}-${Environment}-VpcId'
+      SecurityGroupIngress:
+        - IpProtocol: tcp
+          FromPort: 2049
+          ToPort: 2049
+          SourceSecurityGroupId:
+            Fn::ImportValue: !Sub '${ProjectName}-${Environment}-ECSTaskSG'
+          Description: Allow NFS from ECS tasks
+      Tags:
+        - Key: Name
+          Value: !Sub '${ProjectName}-${Environment}-weaviate-efs-sg'
+
+  # Secrets Manager for Weaviate API Keys
+  WeaviateSecret:
+    Type: AWS::SecretsManager::Secret
+    Properties:
+      Name: !Sub '${ProjectName}/${Environment}/weaviate'
+      Description: Weaviate API keys and configuration
+      SecretString: !Sub |
+        {
+          "AUTHENTICATION_APIKEY_ALLOWED_KEYS": "${WeaviateAPIKey}",
+          "AUTHENTICATION_APIKEY_USERS": "admin"
+        }
+      Tags:
+        - Key: Name
+          Value: !Sub '${ProjectName}/${Environment}/weaviate'
+
+  # CloudWatch Log Group for Weaviate
+  WeaviateLogGroup:
+    Type: AWS::Logs::LogGroup
+    Properties:
+      LogGroupName: !Sub '/ecs/${ProjectName}-${Environment}/weaviate'
+      RetentionInDays: 7
+
+  # Service Discovery Service for Weaviate
+  WeaviateServiceDiscovery:
+    Type: AWS::ServiceDiscovery::Service
+    Properties:
+      Name: weaviate
+      DnsConfig:
+        NamespaceId:
+          Fn::ImportValue: !Sub '${ProjectName}-${Environment}-ServiceDiscoveryNamespaceId'
+        DnsRecords:
+          - Type: A
+            TTL: 10
+      HealthCheckCustomConfig:
+        FailureThreshold: 1
+
+  # ECS Task Definition for Weaviate
+  WeaviateTaskDefinition:
+    Type: AWS::ECS::TaskDefinition
+    Properties:
+      Family: !Sub '${ProjectName}-${Environment}-weaviate'
+      NetworkMode: awsvpc
+      RequiresCompatibilities:
+        - FARGATE
+      Cpu: !Ref TaskCPU
+      Memory: !Ref TaskMemory
+      ExecutionRoleArn:
+        Fn::ImportValue: !Sub '${ProjectName}-${Environment}-TaskExecutionRoleArn'
+      TaskRoleArn:
+        Fn::ImportValue: !Sub '${ProjectName}-${Environment}-TaskRoleArn'
+      ContainerDefinitions:
+        - Name: weaviate
+          Image: !Ref WeaviateImage
+          Essential: true
+          PortMappings:
+            - ContainerPort: 8080
+              Protocol: tcp
+            - ContainerPort: 50051
+              Protocol: tcp
+          Environment:
+            - Name: AUTHENTICATION_APIKEY_ENABLED
+              Value: 'true'
+            - Name: AUTHENTICATION_ANONYMOUS_ACCESS_ENABLED
+              Value: 'false'
+            - Name: PERSISTENCE_DATA_PATH
+              Value: '/var/lib/weaviate'
+            - Name: DEFAULT_VECTORIZER_MODULE
+              Value: 'none'
+            - Name: ENABLE_MODULES
+              Value: ''
+            - Name: CLUSTER_HOSTNAME
+              Value: 'node1'
+            - Name: QUERY_DEFAULTS_LIMIT
+              Value: '25'
+          Secrets:
+            - Name: AUTHENTICATION_APIKEY_ALLOWED_KEYS
+              ValueFrom: !Sub '${WeaviateSecret}:AUTHENTICATION_APIKEY_ALLOWED_KEYS::'
+            - Name: AUTHENTICATION_APIKEY_USERS
+              ValueFrom: !Sub '${WeaviateSecret}:AUTHENTICATION_APIKEY_USERS::'
+          MountPoints:
+            - SourceVolume: weaviate-data
+              ContainerPath: /var/lib/weaviate
+          LogConfiguration:
+            LogDriver: awslogs
+            Options:
+              awslogs-group: !Ref WeaviateLogGroup
+              awslogs-region: !Ref AWS::Region
+              awslogs-stream-prefix: weaviate
+          HealthCheck:
+            Command:
+              - CMD-SHELL
+              - 'wget --no-verbose --tries=1 --spider http://localhost:8080/v1/.well-known/ready || exit 1'
+            Interval: 30
+            Timeout: 5
+            Retries: 3
+            StartPeriod: 40
+      Volumes:
+        - Name: weaviate-data
+          EFSVolumeConfiguration:
+            FilesystemId: !Ref WeaviateEFS
+            TransitEncryption: ENABLED
+            AuthorizationConfig:
+              IAM: ENABLED
+      Tags:
+        - Key: Name
+          Value: !Sub '${ProjectName}-${Environment}-weaviate-task'
+
+  # ECS Service for Weaviate
+  WeaviateService:
+    Type: AWS::ECS::Service
+    DependsOn:
+      - EFSMountTarget1
+      - EFSMountTarget2
+    Properties:
+      ServiceName: !Sub '${ProjectName}-${Environment}-weaviate'
+      Cluster:
+        Fn::ImportValue: !Sub '${ProjectName}-${Environment}-ClusterName'
+      TaskDefinition: !Ref WeaviateTaskDefinition
+      DesiredCount: !Ref DesiredCount
+      LaunchType: FARGATE
+      PlatformVersion: LATEST
+      NetworkConfiguration:
+        AwsvpcConfiguration:
+          AssignPublicIp: DISABLED
+          SecurityGroups:
+            - Fn::ImportValue: !Sub '${ProjectName}-${Environment}-ECSTaskSG'
+          Subnets:
+            - Fn::ImportValue: !Sub '${ProjectName}-${Environment}-PrivateSubnet1'
+            - Fn::ImportValue: !Sub '${ProjectName}-${Environment}-PrivateSubnet2'
+      ServiceRegistries:
+        - RegistryArn: !GetAtt WeaviateServiceDiscovery.Arn
+      DeploymentConfiguration:
+        MaximumPercent: 200
+        MinimumHealthyPercent: 100
+        DeploymentCircuitBreaker:
+          Enable: true
+          Rollback: true
+      Tags:
+        - Key: Name
+          Value: !Sub '${ProjectName}-${Environment}-weaviate-service'
+
+Outputs:
+  WeaviateServiceName:
+    Description: Weaviate ECS Service Name
+    Value: !GetAtt WeaviateService.Name
+    Export:
+      Name: !Sub '${ProjectName}-${Environment}-WeaviateServiceName'
+
+  WeaviateServiceArn:
+    Description: Weaviate ECS Service ARN
+    Value: !Ref WeaviateService
+    Export:
+      Name: !Sub '${ProjectName}-${Environment}-WeaviateServiceArn'
+
+  WeaviateInternalDNS:
+    Description: Internal DNS name for Weaviate (service discovery)
+    Value: !Sub 'weaviate.${ProjectName}-${Environment}.local'
+    Export:
+      Name: !Sub '${ProjectName}-${Environment}-WeaviateInternalDNS'
+
+  WeaviateEFSId:
+    Description: EFS File System ID for Weaviate
+    Value: !Ref WeaviateEFS
+    Export:
+      Name: !Sub '${ProjectName}-${Environment}-WeaviateEFSId'

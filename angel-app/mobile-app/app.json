@@ -7,6 +7,8 @@
     "icon": "./assets/icon.png",
     "userInterfaceStyle": "light",
     "newArchEnabled": true,
+    "description": "Your personal AI assistant for natural voice conversations",
+    "privacy": "public",
     "splash": {
       "image": "./assets/splash-icon.png",
       "resizeMode": "contain",
@@ -14,7 +16,11 @@
     },
     "ios": {
       "supportsTablet": true,
-      "bundleIdentifier": "com.anonymous.AngelApp"
+      "bundleIdentifier": "com.centauraa.angelapp",
+      "buildNumber": "1",
+      "infoPlist": {
+        "NSMicrophoneUsageDescription": "AngelApp needs access to your microphone to enable voice conversations with your AI assistant."
+      }
     },
     "android": {
       "adaptiveIcon": {

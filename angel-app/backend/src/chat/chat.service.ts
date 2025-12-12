@@ -96,6 +96,11 @@ export class ChatService {
 
     const savedMessage = await this.messageRepository.save(botMessage);
 
+    // Store embeddings for RAG (asynchronous, don't block response)
+    this.storeMessageEmbeddings(conversation.id, content, botResponse).catch(err =>
+      this.logger.error('Failed to store message embeddings:', err)
+    );
+
     // Invalidate caches after new message
     await this.invalidateUserCache(userId, conversation.id);
 
@@ -473,6 +478,56 @@ Generate a comprehensive but concise summary:`;
     } catch (error) {
       this.logger.error('Error generating user context:', error);
       // Don't throw - context generation should not block the chat
+    }
+  }
+
+  /**
+   * Store embeddings for user and bot messages in Weaviate
+   */
+  private async storeMessageEmbeddings(
+    conversationId: string,
+    userMessage: string,
+    botMessage: string,
+  ): Promise<void> {
+    try {
+      // Get all messages for this conversation to determine turn indices
+      const messages = await this.messageRepository.find({
+        where: { conversation: { id: conversationId } },
+        order: { createdAt: 'ASC' },
+      });
+
+      // Calculate turn index (each exchange = 2 messages)
+      const messageCount = messages.length;
+      const turnIndex = Math.floor((messageCount - 2) / 2); // -2 for the current pair
+
+      const timestamp = Date.now();
+
+      // Generate and store embedding for user message
+      const userEmbedding = await this.ragService.generateQueryEmbedding(userMessage);
+      await this.ragService.storeEmbedding(
+        conversationId,
+        turnIndex,
+        'CUSTOMER',
+        userMessage,
+        userEmbedding,
+        timestamp,
+      );
+
+      // Generate and store embedding for bot message
+      const botEmbedding = await this.ragService.generateQueryEmbedding(botMessage);
+      await this.ragService.storeEmbedding(
+        conversationId,
+        turnIndex,
+        'AGENT',
+        botMessage,
+        botEmbedding,
+        timestamp + 1, // Slightly different timestamp to maintain order
+      );
+
+      this.logger.log(`Stored embeddings for conversation ${conversationId}, turn ${turnIndex}`);
+    } catch (error: any) {
+      this.logger.error(`Failed to store embeddings for conversation ${conversationId}:`, error.message);
+      // Don't throw - embedding storage failure should not break the chat flow
     }
   }
 }

@@ -1,9 +1,8 @@
 import axios from 'axios';
 import AsyncStorage from '@react-native-async-storage/async-storage';
 
-// Use your computer's IP address when running on iOS simulator
-// Change this to your actual backend URL or IP address
-const API_URL = 'http://192.168.0.184:3000';
+// AWS Application Load Balancer URL
+const API_URL = 'http://angel-backend-dev-alb-448499488.us-west-2.elb.amazonaws.com';
 
 export const api = axios.create({
   baseURL: API_URL,

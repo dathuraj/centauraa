@@ -1,0 +1,341 @@
+AWSTemplateFormatVersion: '2010-09-09'
+Description: 'Angel Backend NestJS Application ECS Fargate Service'
+
+Parameters:
+  ProjectName:
+    Type: String
+    Default: angel-backend
+    Description: Project name for resource naming
+
+  Environment:
+    Type: String
+    Default: dev
+    AllowedValues:
+      - dev
+      - staging
+      - prod
+    Description: Environment name
+
+  BackendImage:
+    Type: String
+    Description: Backend Docker image (e.g., 123456789012.dkr.ecr.us-west-2.amazonaws.com/angel-backend:latest)
+
+  TaskCPU:
+    Type: String
+    Default: '512'
+    AllowedValues:
+      - '256'
+      - '512'
+      - '1024'
+      - '2048'
+    Description: Task CPU units (512 = 0.5 vCPU)
+
+  TaskMemory:
+    Type: String
+    Default: '1024'
+    AllowedValues:
+      - '512'
+      - '1024'
+      - '2048'
+      - '3072'
+      - '4096'
+    Description: Task memory in MB
+
+  DesiredCount:
+    Type: Number
+    Default: 1
+    Description: Desired number of tasks
+
+  MinCapacity:
+    Type: Number
+    Default: 1
+    Description: Minimum number of tasks for auto-scaling
+
+  MaxCapacity:
+    Type: Number
+    Default: 2
+    Description: Maximum number of tasks for auto-scaling
+
+  # Application Secrets
+  JWTSecret:
+    Type: String
+    Description: JWT secret key
+    NoEcho: true
+
+  OpenAIAPIKey:
+    Type: String
+    Description: OpenAI API key
+    NoEcho: true
+
+  GeminiAPIKey:
+    Type: String
+    Description: Google Gemini API key
+    NoEcho: true
+
+  MailUser:
+    Type: String
+    Description: Email service username
+    NoEcho: true
+
+  MailPass:
+    Type: String
+    Description: Email service password
+    NoEcho: true
+
+  WeaviateAPIKey:
+    Type: String
+    Description: Weaviate API key
+    NoEcho: true
+
+Resources:
+  # Secrets Manager for Application Secrets
+  AppSecret:
+    Type: AWS::SecretsManager::Secret
+    Properties:
+      Name: !Sub '${ProjectName}/${Environment}/app-secrets'
+      Description: Application secrets for Angel Backend
+      SecretString: !Sub |
+        {
+          "JWT_SECRET": "${JWTSecret}",
+          "OPENAI_API_KEY": "${OpenAIAPIKey}",
+          "GEMINI_API_KEY": "${GeminiAPIKey}",
+          "MAIL_USER": "${MailUser}",
+          "MAIL_PASS": "${MailPass}",
+          "WEAVIATE_API_KEY": "b5196cb8d5f0fae0d98899701e8aa6a9dfa6e3a5afaf8eb1f4a506fcff33edff"
+        }
+      Tags:
+        - Key: Name
+          Value: !Sub '${ProjectName}/${Environment}/app-secrets'
+
+  # CloudWatch Log Group for Backend
+  BackendLogGroup:
+    Type: AWS::Logs::LogGroup
+    Properties:
+      LogGroupName: !Sub '/ecs/${ProjectName}-${Environment}/backend'
+      RetentionInDays: 7
+
+  # Service Discovery Service for Backend
+  BackendServiceDiscovery:
+    Type: AWS::ServiceDiscovery::Service
+    Properties:
+      Name: backend
+      DnsConfig:
+        NamespaceId:
+          Fn::ImportValue: !Sub '${ProjectName}-${Environment}-ServiceDiscoveryNamespaceId'
+        DnsRecords:
+          - Type: A
+            TTL: 10
+      HealthCheckCustomConfig:
+        FailureThreshold: 1
+
+  # ECS Task Definition for Backend
+  BackendTaskDefinition:
+    Type: AWS::ECS::TaskDefinition
+    Properties:
+      Family: !Sub '${ProjectName}-${Environment}-backend'
+      NetworkMode: awsvpc
+      RequiresCompatibilities:
+        - FARGATE
+      Cpu: !Ref TaskCPU
+      Memory: !Ref TaskMemory
+      ExecutionRoleArn:
+        Fn::ImportValue: !Sub '${ProjectName}-${Environment}-TaskExecutionRoleArn'
+      TaskRoleArn:
+        Fn::ImportValue: !Sub '${ProjectName}-${Environment}-TaskRoleArn'
+      ContainerDefinitions:
+        - Name: backend
+          Image: !Ref BackendImage
+          Essential: true
+          PortMappings:
+            - ContainerPort: 3000
+              Protocol: tcp
+            - ContainerPort: 443
+              Protocol: tcp
+          Environment:
+            - Name: NODE_ENV
+              Value: production
+            - Name: PORT
+              Value: '3000'
+            - Name: HTTPS_ENABLED
+              Value: 'false'
+            - Name: JWT_EXPIRES_IN
+              Value: '7d'
+            - Name: MAIL_HOST
+              Value: 'smtp.gmail.com'
+            - Name: MAIL_PORT
+              Value: '465'
+            - Name: AI_PROVIDER
+              Value: 'openai'
+            - Name: OPENAI_MODEL
+              Value: 'gpt-4o-mini'
+            - Name: GEMINI_MODEL
+              Value: 'gemini-1.5-flash'
+            - Name: ENABLE_RAG
+              Value: 'true'
+            - Name: RAG_LIMIT
+              Value: '3'
+            - Name: RAG_SIMILARITY_THRESHOLD
+              Value: '0.5'
+            - Name: WEAVIATE_SCHEME
+              Value: 'http'
+            - Name: WEAVIATE_HOST
+              Value: !Sub 'weaviate.${ProjectName}-${Environment}.local:8080'
+            - Name: DATABASE_HOST
+              Value:
+                Fn::ImportValue: !Sub '${ProjectName}-${Environment}-DBEndpoint'
+            - Name: DATABASE_PORT
+              Value:
+                Fn::ImportValue: !Sub '${ProjectName}-${Environment}-DBPort'
+            - Name: DATABASE_NAME
+              Value:
+                Fn::ImportValue: !Sub '${ProjectName}-${Environment}-DBName'
+            - Name: DB_TYPE
+              Value: 'postgres'
+            - Name: DB_SYNCHRONIZE
+              Value: 'false'
+            - Name: DB_LOGGING
+              Value: 'false'
+            - Name: DB_SSL
+              Value: 'true'
+            - Name: DB_SSL_REJECT_UNAUTHORIZED
+              Value: 'false'
+          Secrets:
+            - Name: DATABASE_USER
+              ValueFrom: !Sub
+                - '${DBSecretArn}:username::'
+                - DBSecretArn:
+                    Fn::ImportValue: !Sub '${ProjectName}-${Environment}-DBSecretArn'
+            - Name: DATABASE_PASSWORD
+              ValueFrom: !Sub
+                - '${DBSecretArn}:password::'
+                - DBSecretArn:
+                    Fn::ImportValue: !Sub '${ProjectName}-${Environment}-DBSecretArn'
+            - Name: JWT_SECRET
+              ValueFrom: !Sub '${AppSecret}:JWT_SECRET::'
+            - Name: OPENAI_API_KEY
+              ValueFrom: !Sub '${AppSecret}:OPENAI_API_KEY::'
+            - Name: GEMINI_API_KEY
+              ValueFrom: !Sub '${AppSecret}:GEMINI_API_KEY::'
+            - Name: MAIL_USER
+              ValueFrom: !Sub '${AppSecret}:MAIL_USER::'
+            - Name: MAIL_PASS
+              ValueFrom: !Sub '${AppSecret}:MAIL_PASS::'
+            - Name: WEAVIATE_API_KEY_ALLOWED_KEYS
+              ValueFrom: !Sub '${AppSecret}:WEAVIATE_API_KEY::'
+          LogConfiguration:
+            LogDriver: awslogs
+            Options:
+              awslogs-group: !Ref BackendLogGroup
+              awslogs-region: !Ref AWS::Region
+              awslogs-stream-prefix: backend
+          HealthCheck:
+            Command:
+              - CMD-SHELL
+              - 'wget -q --spider http://localhost:3000/health || exit 1'
+            Interval: 30
+            Timeout: 5
+            Retries: 3
+            StartPeriod: 90
+      Tags:
+        - Key: Name
+          Value: !Sub '${ProjectName}-${Environment}-backend-task'
+
+  # ECS Service for Backend
+  BackendService:
+    Type: AWS::ECS::Service
+    Properties:
+      ServiceName: !Sub '${ProjectName}-${Environment}-backend'
+      Cluster:
+        Fn::ImportValue: !Sub '${ProjectName}-${Environment}-ClusterName'
+      TaskDefinition: !Ref BackendTaskDefinition
+      DesiredCount: !Ref DesiredCount
+      LaunchType: FARGATE
+      PlatformVersion: LATEST
+      NetworkConfiguration:
+        AwsvpcConfiguration:
+          AssignPublicIp: DISABLED
+          SecurityGroups:
+            - Fn::ImportValue: !Sub '${ProjectName}-${Environment}-ECSTaskSG'
+          Subnets:
+            - Fn::ImportValue: !Sub '${ProjectName}-${Environment}-PrivateSubnet1'
+            - Fn::ImportValue: !Sub '${ProjectName}-${Environment}-PrivateSubnet2'
+      LoadBalancers:
+        - TargetGroupArn:
+            Fn::ImportValue: !Sub '${ProjectName}-${Environment}-BackendTargetGroupArn'
+          ContainerName: backend
+          ContainerPort: 3000
+      ServiceRegistries:
+        - RegistryArn: !GetAtt BackendServiceDiscovery.Arn
+      DeploymentConfiguration:
+        MaximumPercent: 200
+        MinimumHealthyPercent: 100
+        DeploymentCircuitBreaker:
+          Enable: true
+          Rollback: true
+      Tags:
+        - Key: Name
+          Value: !Sub '${ProjectName}-${Environment}-backend-service'
+
+  # Auto Scaling Target
+  BackendScalableTarget:
+    Type: AWS::ApplicationAutoScaling::ScalableTarget
+    Properties:
+      ServiceNamespace: ecs
+      ResourceId: !Sub 'service/${ProjectName}-${Environment}-cluster/${BackendService.Name}'
+      ScalableDimension: ecs:service:DesiredCount
+      MinCapacity: !Ref MinCapacity
+      MaxCapacity: !Ref MaxCapacity
+      RoleARN: !Sub 'arn:aws:iam::${AWS::AccountId}:role/aws-service-role/ecs.application-autoscaling.amazonaws.com/AWSServiceRoleForApplicationAutoScaling_ECSService'
+
+  # Auto Scaling Policy - CPU
+  BackendScalingPolicyCPU:
+    Type: AWS::ApplicationAutoScaling::ScalingPolicy
+    Properties:
+      PolicyName: !Sub '${ProjectName}-${Environment}-backend-cpu-scaling'
+      PolicyType: TargetTrackingScaling
+      ScalingTargetId: !Ref BackendScalableTarget
+      TargetTrackingScalingPolicyConfiguration:
+        PredefinedMetricSpecification:
+          PredefinedMetricType: ECSServiceAverageCPUUtilization
+        TargetValue: 70.0
+        ScaleInCooldown: 300
+        ScaleOutCooldown: 60
+
+  # Auto Scaling Policy - Memory
+  BackendScalingPolicyMemory:
+    Type: AWS::ApplicationAutoScaling::ScalingPolicy
+    Properties:
+      PolicyName: !Sub '${ProjectName}-${Environment}-backend-memory-scaling'
+      PolicyType: TargetTrackingScaling
+      ScalingTargetId: !Ref BackendScalableTarget
+      TargetTrackingScalingPolicyConfiguration:
+        PredefinedMetricSpecification:
+          PredefinedMetricType: ECSServiceAverageMemoryUtilization
+        TargetValue: 80.0
+        ScaleInCooldown: 300
+        ScaleOutCooldown: 60
+
+Outputs:
+  BackendServiceName:
+    Description: Backend ECS Service Name
+    Value: !GetAtt BackendService.Name
+    Export:
+      Name: !Sub '${ProjectName}-${Environment}-BackendServiceName'
+
+  BackendServiceArn:
+    Description: Backend ECS Service ARN
+    Value: !Ref BackendService
+    Export:
+      Name: !Sub '${ProjectName}-${Environment}-BackendServiceArn'
+
+  BackendInternalDNS:
+    Description: Internal DNS name for Backend (service discovery)
+    Value: !Sub 'backend.${ProjectName}-${Environment}.local'
+    Export:
+      Name: !Sub '${ProjectName}-${Environment}-BackendInternalDNS'
+
+  BackendAccessNote:
+    Description: Backend is accessible via public IP on port 3000. Use AWS CLI or Console to find task public IPs
+    Value: 'Use "aws ecs describe-tasks" to get public IP addresses of running tasks'
+    Export:
+      Name: !Sub '${ProjectName}-${Environment}-BackendAccessNote'

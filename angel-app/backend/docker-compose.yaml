@@ -1,0 +1,34 @@
+version: '3.4'
+services:
+  weaviate:
+    # Use the official Weaviate image
+    image: cr.weaviate.io/semitechnologies/weaviate:latest
+    env_file:
+      - .env
+    ports:
+      # HTTP port (for REST API)
+      - "8080:8080"
+      # gRPC port
+      - "50051:50051"
+    environment:
+      # --- Configuration for Authentication ---
+      # 1. Enable API Key Authentication
+      AUTHENTICATION_APIKEY_ENABLED: 'true'
+      # 2. Define the allowed API keys and corresponding users (values from .env file)
+      AUTHENTICATION_APIKEY_ALLOWED_KEYS: '${WEAVIATE_API_KEY_ALLOWED_KEYS}'
+      AUTHENTICATION_APIKEY_USERS: '${WEAVIATE_API_KEY_USERS}'
+      # 3. Disable anonymous access (strongly recommended)
+      AUTHENTICATION_ANONYMOUS_ACCESS_ENABLED: 'false'
+      
+      # --- General Configuration ---
+      # Data persistence path
+      PERSISTENCE_DATA_PATH: '/var/lib/weaviate'
+      # General configuration settings
+      DEFAULT_VECTORIZER_MODULE: 'none' # Recommended for local-only, if you use a model, change this.
+      ENABLE_MODULES: '' # Add modules here if needed (e.g., 'text2vec-openai')
+      CLUSTER_HOSTNAME: 'node1'
+    volumes:
+      # Persistent volume to store your data locally
+      - weaviate_data:/var/lib/weaviate
+volumes:
+  weaviate_data:

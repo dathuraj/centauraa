@@ -1,9 +1,7 @@
 import { Injectable } from '@nestjs/common';
-import { InjectRepository } from '@nestjs/typeorm';
-import { Repository } from 'typeorm';
 import { ConfigService } from '@nestjs/config';
 import OpenAI from 'openai';
-import { ConversationEmbedding } from '../entities/conversation-embedding.entity';
+import { WeaviateConfigService } from '../config/weaviate.config';
 
 export interface RAGResult {
   conversationId: string;
@@ -19,13 +17,46 @@ export class RAGService {
   private openai: OpenAI;
 
   constructor(
-    @InjectRepository(ConversationEmbedding)
-    private conversationEmbeddingRepository: Repository<ConversationEmbedding>,
+    private weaviateConfig: WeaviateConfigService,
     private configService: ConfigService,
   ) {
     const apiKey = this.configService.get('OPENAI_API_KEY');
     if (apiKey) {
       this.openai = new OpenAI({ apiKey });
+    }
+  }
+
+  /**
+   * Store conversation embedding in Weaviate
+   */
+  async storeEmbedding(
+    conversationId: string,
+    turnIndex: number,
+    speaker: string,
+    textChunk: string,
+    embedding: number[],
+    timestamp?: number,
+  ): Promise<void> {
+    try {
+      const client = this.weaviateConfig.getClient();
+
+      await client.data
+        .creator()
+        .withClassName('ConversationEmbedding')
+        .withProperties({
+          conversationId,
+          turnIndex,
+          speaker,
+          textChunk,
+          timestamp: timestamp || Date.now(),
+        })
+        .withVector(embedding)
+        .do();
+
+      console.log(`Stored embedding for conversation ${conversationId}, turn ${turnIndex}`);
+    } catch (error) {
+      console.error('Error storing embedding in Weaviate:', error);
+      throw error;
     }
   }
 
@@ -52,7 +83,7 @@ export class RAGService {
   }
 
   /**
-   * Perform semantic search across all conversation embeddings
+   * Perform semantic search across all conversation embeddings using Weaviate
    */
   async semanticSearch(
     query: string,
@@ -60,44 +91,32 @@ export class RAGService {
     similarityThreshold: number = 0.7,
   ): Promise<RAGResult[]> {
     try {
-      // Generate embedding for the query
       const queryEmbedding = await this.generateQueryEmbedding(query);
+      const client = this.weaviateConfig.getClient();
 
-      // Perform vector similarity search using cosine distance
-      // pgvector: <=> operator for cosine distance (0 = identical, 2 = opposite)
-      // Convert to similarity score: 1 - (distance / 2) to get 0-1 scale
-      // OPTIMIZED: Use ORDER BY with vector operator directly (uses HNSW index)
-      // LIMIT first, then filter - this is much faster with index
-      const results = await this.conversationEmbeddingRepository.query(
-        `
-        SELECT
-          conversation_id,
-          turn_index,
-          speaker,
-          text_chunk,
-          timestamp,
-          1 - (embedding <=> $1::vector) as similarity
-        FROM conversation_embeddings
-        WHERE embedding IS NOT NULL
-        ORDER BY embedding <=> $1::vector
-        LIMIT $2
-        `,
-        [JSON.stringify(queryEmbedding), limit * 2], // Get 2x limit, then filter
-      );
+      const response = await client.graphql
+        .get()
+        .withClassName('ConversationEmbedding')
+        .withFields('conversationId turnIndex speaker textChunk timestamp _additional { distance }')
+        .withNearVector({ vector: queryEmbedding })
+        .withLimit(limit * 2) // Get extra results to filter by threshold
+        .do();
 
-      // Filter by similarity threshold in application code
-      // This is faster than filtering in SQL with vector operations
+      const results = response.data.Get.ConversationEmbedding || [];
+
+      // Convert distance to similarity (cosine distance: 0 = identical, 2 = opposite)
+      // Similarity = 1 - (distance / 2) to get 0-1 scale
       return results
-        .filter((row: any) => parseFloat(row.similarity) >= similarityThreshold)
-        .slice(0, limit)
-        .map((row: any) => ({
-          conversationId: row.conversation_id,
-          turnIndex: row.turn_index,
-          speaker: row.speaker,
-          textChunk: row.text_chunk,
-          similarity: parseFloat(row.similarity),
-          timestamp: row.timestamp ? parseInt(row.timestamp) : 0,
-        }));
+        .map((item: any) => ({
+          conversationId: item.conversationId,
+          turnIndex: item.turnIndex,
+          speaker: item.speaker,
+          textChunk: item.textChunk,
+          similarity: 1 - (item._additional.distance / 2),
+          timestamp: item.timestamp || 0,
+        }))
+        .filter((result: RAGResult) => result.similarity >= similarityThreshold)
+        .slice(0, limit);
     } catch (error) {
       console.error('Error performing semantic search:', error);
       return [];
@@ -105,7 +124,7 @@ export class RAGService {
   }
 
   /**
-   * Search within a specific conversation
+   * Search within a specific conversation using Weaviate
    */
   async searchInConversation(
     conversationId: string,
@@ -114,33 +133,30 @@ export class RAGService {
   ): Promise<RAGResult[]> {
     try {
       const queryEmbedding = await this.generateQueryEmbedding(query);
+      const client = this.weaviateConfig.getClient();
 
-      // OPTIMIZED: Use index-friendly query structure
-      const results = await this.conversationEmbeddingRepository.query(
-        `
-        SELECT
-          conversation_id,
-          turn_index,
-          speaker,
-          text_chunk,
-          timestamp,
-          1 - (embedding <=> $1::vector) as similarity
-        FROM conversation_embeddings
-        WHERE conversation_id = $2
-          AND embedding IS NOT NULL
-        ORDER BY embedding <=> $1::vector
-        LIMIT $3
-        `,
-        [JSON.stringify(queryEmbedding), conversationId, limit],
-      );
+      const response = await client.graphql
+        .get()
+        .withClassName('ConversationEmbedding')
+        .withFields('conversationId turnIndex speaker textChunk timestamp _additional { distance }')
+        .withNearVector({ vector: queryEmbedding })
+        .withWhere({
+          path: ['conversationId'],
+          operator: 'Equal',
+          valueText: conversationId,
+        })
+        .withLimit(limit)
+        .do();
 
-      return results.map((row: any) => ({
-        conversationId: row.conversation_id,
-        turnIndex: row.turn_index,
-        speaker: row.speaker,
-        textChunk: row.text_chunk,
-        similarity: parseFloat(row.similarity),
-        timestamp: row.timestamp ? parseInt(row.timestamp) : 0,
+      const results = response.data.Get.ConversationEmbedding || [];
+
+      return results.map((item: any) => ({
+        conversationId: item.conversationId,
+        turnIndex: item.turnIndex,
+        speaker: item.speaker,
+        textChunk: item.textChunk,
+        similarity: 1 - (item._additional.distance / 2),
+        timestamp: item.timestamp || 0,
       }));
     } catch (error) {
       console.error('Error searching in conversation:', error);
@@ -219,7 +235,7 @@ export class RAGService {
   }
 
   /**
-   * Search for similar chunks filtered by speaker role
+   * Search for similar chunks (speaker filter removed to support MIXED speaker data)
    */
   private async semanticSearchByRole(
     query: string,
@@ -229,39 +245,35 @@ export class RAGService {
   ): Promise<RAGResult[]> {
     try {
       const queryEmbedding = await this.generateQueryEmbedding(query);
+      const client = this.weaviateConfig.getClient();
 
-      // Use a placeholder for logging to avoid massive embedding arrays in logs
-      const embeddingPlaceholder = `[embedding vector: ${queryEmbedding.length} dimensions]`;
+      const response = await client.graphql
+        .get()
+        .withClassName('ConversationEmbedding')
+        .withFields('conversationId turnIndex speaker textChunk timestamp _additional { distance }')
+        .withNearVector({ vector: queryEmbedding })
+        // Speaker filter removed to support MIXED speaker type from data pipeline
+        // .withWhere({
+        //   path: ['speaker'],
+        //   operator: 'Equal',
+        //   valueText: role,
+        // })
+        .withLimit(limit * 2)
+        .do();
 
-      const results = await this.conversationEmbeddingRepository.query(
-        `
-        SELECT
-          conversation_id,
-          turn_index,
-          speaker,
-          text_chunk,
-          timestamp,
-          1 - (embedding <=> $1::vector) as similarity
-        FROM conversation_embeddings
-        WHERE embedding IS NOT NULL
-          AND speaker = $2
-        ORDER BY embedding <=> $1::vector
-        LIMIT $3
-        `,
-        [JSON.stringify(queryEmbedding), role, limit * 2],
-      );
+      const results = response.data.Get.ConversationEmbedding || [];
 
       return results
-        .filter((row: any) => parseFloat(row.similarity) >= similarityThreshold)
-        .slice(0, limit)
-        .map((row: any) => ({
-          conversationId: row.conversation_id,
-          turnIndex: row.turn_index,
-          speaker: row.speaker,
-          textChunk: row.text_chunk,
-          similarity: parseFloat(row.similarity),
-          timestamp: row.timestamp ? parseInt(row.timestamp) : 0,
-        }));
+        .map((item: any) => ({
+          conversationId: item.conversationId,
+          turnIndex: item.turnIndex,
+          speaker: item.speaker,
+          textChunk: item.textChunk,
+          similarity: 1 - (item._additional.distance / 2),
+          timestamp: item.timestamp || 0,
+        }))
+        .filter((result: RAGResult) => result.similarity >= similarityThreshold)
+        .slice(0, limit);
     } catch (error) {
       console.error('Error in semanticSearchByRole:', error);
       return [];
@@ -269,41 +281,50 @@ export class RAGService {
   }
 
   /**
-   * Get entire conversations by conversation IDs
+   * Get entire conversations by conversation IDs using Weaviate
    */
   private async getEntireConversations(
     conversationIds: string[],
   ): Promise<Array<{ conversationId: string; chunks: RAGResult[] }>> {
     const conversations: Array<{ conversationId: string; chunks: RAGResult[] }> = [];
+    const client = this.weaviateConfig.getClient();
 
     for (const conversationId of conversationIds) {
-      const chunks = await this.conversationEmbeddingRepository.query(
-        `
-        SELECT
-          conversation_id,
-          turn_index,
-          speaker,
-          text_chunk,
-          timestamp
-        FROM conversation_embeddings
-        WHERE conversation_id = $1
-        ORDER BY turn_index ASC
-        `,
-        [conversationId],
-      );
+      try {
+        const response = await client.graphql
+          .get()
+          .withClassName('ConversationEmbedding')
+          .withFields('conversationId turnIndex speaker textChunk timestamp')
+          .withWhere({
+            path: ['conversationId'],
+            operator: 'Equal',
+            valueText: conversationId,
+          })
+          .withLimit(1000) // Get all turns in the conversation
+          .do();
 
-      if (chunks.length > 0) {
-        conversations.push({
-          conversationId,
-          chunks: chunks.map((row: any) => ({
-            conversationId: row.conversation_id,
-            turnIndex: row.turn_index,
-            speaker: row.speaker,
-            textChunk: row.text_chunk,
-            similarity: 1.0, // Full conversation, not similarity-based
-            timestamp: row.timestamp ? parseInt(row.timestamp) : 0,
-          })),
-        });
+        const chunks = response.data.Get.ConversationEmbedding || [];
+
+        if (chunks.length > 0) {
+          // Sort by turn index
+          const sortedChunks = chunks
+            .map((item: any) => ({
+              conversationId: item.conversationId,
+              turnIndex: item.turnIndex,
+              speaker: item.speaker,
+              textChunk: item.textChunk,
+              similarity: 1.0, // Full conversation, not similarity-based
+              timestamp: item.timestamp || 0,
+            }))
+            .sort((a: RAGResult, b: RAGResult) => a.turnIndex - b.turnIndex);
+
+          conversations.push({
+            conversationId,
+            chunks: sortedChunks,
+          });
+        }
+      } catch (error) {
+        console.error(`Error fetching conversation ${conversationId}:`, error);
       }
     }
 
@@ -393,32 +414,44 @@ export class RAGService {
   }
 
   /**
-   * Get conversation history by conversation ID
+   * Get conversation history by conversation ID using Weaviate
    */
   async getConversationHistory(
     conversationId: string,
     limit?: number,
   ): Promise<RAGResult[]> {
     try {
-      const query = this.conversationEmbeddingRepository
-        .createQueryBuilder('ce')
-        .where('ce.conversationId = :conversationId', { conversationId })
-        .orderBy('ce.turnIndex', 'ASC');
+      const client = this.weaviateConfig.getClient();
+
+      const query = client.graphql
+        .get()
+        .withClassName('ConversationEmbedding')
+        .withFields('conversationId turnIndex speaker textChunk timestamp')
+        .withWhere({
+          path: ['conversationId'],
+          operator: 'Equal',
+          valueText: conversationId,
+        });
 
       if (limit) {
-        query.limit(limit);
+        query.withLimit(limit);
+      } else {
+        query.withLimit(1000);
       }
 
-      const results = await query.getMany();
+      const response = await query.do();
+      const results = response.data.Get.ConversationEmbedding || [];
 
-      return results.map((row) => ({
-        conversationId: row.conversationId,
-        turnIndex: row.turnIndex,
-        speaker: row.speaker,
-        textChunk: row.textChunk,
-        similarity: 1.0, // Not applicable for direct retrieval
-        timestamp: row.timestamp || 0,
-      }));
+      return results
+        .map((item: any) => ({
+          conversationId: item.conversationId,
+          turnIndex: item.turnIndex,
+          speaker: item.speaker,
+          textChunk: item.textChunk,
+          similarity: 1.0, // Not applicable for direct retrieval
+          timestamp: item.timestamp || 0,
+        }))
+        .sort((a: RAGResult, b: RAGResult) => a.turnIndex - b.turnIndex);
     } catch (error) {
       console.error('Error getting conversation history:', error);
       return [];

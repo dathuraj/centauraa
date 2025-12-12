@@ -14,7 +14,7 @@ import { Message } from '../entities/message.entity';
 import { User } from '../entities/user.entity';
 import { UserPreference } from '../entities/user-preference.entity';
 import { MoodLog } from '../entities/mood-log.entity';
-import { ConversationEmbedding } from '../entities/conversation-embedding.entity';
+import { WeaviateModule } from '../weaviate/weaviate.module';
 
 @Module({
   imports: [
@@ -24,8 +24,8 @@ import { ConversationEmbedding } from '../entities/conversation-embedding.entity
       User,
       UserPreference,
       MoodLog,
-      ConversationEmbedding,
     ]),
+    WeaviateModule,
     JwtModule.registerAsync({
       imports: [ConfigModule],
       useFactory: async (configService: ConfigService) => ({

@@ -17,6 +17,11 @@ export const getDatabaseConfig = (
   logger: new CustomDatabaseLogger(), // Custom logger that filters embedding queries
   maxQueryExecutionTime: 1000, // Log queries slower than 1 second
 
+  // SSL configuration for RDS
+  ssl: configService.get('DB_SSL') === 'true' ? {
+    rejectUnauthorized: configService.get('DB_SSL_REJECT_UNAUTHORIZED') !== 'false'
+  } : false,
+
   // Connection pooling for better performance
   extra: {
     max: 20, // Maximum number of clients in the pool

@@ -1,0 +1,21 @@
+{
+  "ProjectName": "angel-backend",
+  "Environment": "dev",
+  "DBPassword": "CHANGE_ME_SecurePassword123!",
+  "DBUsername": "angel_user",
+  "DBName": "angel_db",
+  "DBInstanceClass": "db.t4g.micro",
+  "MultiAZ": "false",
+  "JWTSecret": "CHANGE_ME_JWT_SECRET_KEY_AT_LEAST_32_CHARS",
+  "OpenAIAPIKey": "sk-CHANGE_ME_YOUR_OPENAI_API_KEY",
+  "GeminiAPIKey": "CHANGE_ME_YOUR_GEMINI_API_KEY",
+  "MailUser": "your-email@example.com",
+  "MailPass": "CHANGE_ME_YOUR_EMAIL_PASSWORD",
+  "WeaviateAPIKey": "CHANGE_ME_WEAVIATE_API_KEY",
+  "BackendImage": "123456789012.dkr.ecr.us-west-2.amazonaws.com/angel-backend:latest",
+  "BackendTaskCPU": "512",
+  "BackendTaskMemory": "1024",
+  "BackendDesiredCount": "1",
+  "WeaviateTaskCPU": "1024",
+  "WeaviateTaskMemory": "2048"
+}
