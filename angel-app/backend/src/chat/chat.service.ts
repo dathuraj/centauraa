@@ -12,7 +12,7 @@ import { User } from '../entities/user.entity';
 import { UserPreference } from '../entities/user-preference.entity';
 import { MoodLog } from '../entities/mood-log.entity';
 import { RAGService, RAGResult } from './rag.service';
-import { ANGEL_CORE_GUIDELINES, ANGEL_ROLE_DESCRIPTION, RAG_INSTRUCTION } from '../prompts/angel-system-prompt';
+import angelPrompts from '../prompts/angel-system-prompt.json';
 
 @Injectable()
 export class ChatService {
@@ -307,7 +307,7 @@ export class ChatService {
   }
 
   private buildSystemPrompt(context: any, ragContext?: string): string {
-    let prompt = `${ANGEL_ROLE_DESCRIPTION}
+    let prompt = `${angelPrompts.angelRoleDescription}
 
     User Context:
     - Name: ${context.userName}
@@ -323,10 +323,10 @@ export class ChatService {
     // Add RAG context if available
     if (ragContext && ragContext.trim().length > 0) {
       prompt += `\n${ragContext}\n`;
-      prompt += RAG_INSTRUCTION;
+      prompt += angelPrompts.ragInstruction;
     }
 
-    prompt += ANGEL_CORE_GUIDELINES;
+    prompt += angelPrompts.angelCoreGuidelines;
     return prompt;
   }
 

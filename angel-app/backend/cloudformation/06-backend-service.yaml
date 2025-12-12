@@ -153,7 +153,7 @@ Resources:
               Protocol: tcp
           Environment:
             - Name: NODE_ENV
-              Value: production
+              Value: development
             - Name: PORT
               Value: '3000'
             - Name: HTTPS_ENABLED
@@ -169,9 +169,9 @@ Resources:
             - Name: OPENAI_MODEL
               Value: 'gpt-4o-mini'
             - Name: GEMINI_MODEL
-              Value: 'gemini-1.5-flash'
+              Value: 'gemini-2.5-flash'
             - Name: ENABLE_RAG
-              Value: 'true'
+              Value: 'false'
             - Name: RAG_LIMIT
               Value: '3'
             - Name: RAG_SIMILARITY_THRESHOLD
@@ -253,12 +253,12 @@ Resources:
       PlatformVersion: LATEST
       NetworkConfiguration:
         AwsvpcConfiguration:
-          AssignPublicIp: DISABLED
+          AssignPublicIp: ENABLED
           SecurityGroups:
             - Fn::ImportValue: !Sub '${ProjectName}-${Environment}-ECSTaskSG'
           Subnets:
-            - Fn::ImportValue: !Sub '${ProjectName}-${Environment}-PrivateSubnet1'
-            - Fn::ImportValue: !Sub '${ProjectName}-${Environment}-PrivateSubnet2'
+            - Fn::ImportValue: !Sub '${ProjectName}-${Environment}-PublicSubnet1'
+            - Fn::ImportValue: !Sub '${ProjectName}-${Environment}-PublicSubnet2'
       LoadBalancers:
         - TargetGroupArn:
             Fn::ImportValue: !Sub '${ProjectName}-${Environment}-BackendTargetGroupArn'
