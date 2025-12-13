@@ -1,4 +1,4 @@
-import { Injectable, Inject, Logger } from '@nestjs/common';
+import { Injectable, Inject, Logger, BadRequestException } from '@nestjs/common';
 import { InjectRepository } from '@nestjs/typeorm';
 import { Repository } from 'typeorm';
 import { ConfigService } from '@nestjs/config';
@@ -13,6 +13,8 @@ import { UserPreference } from '../entities/user-preference.entity';
 import { MoodLog } from '../entities/mood-log.entity';
 import { RAGService, RAGResult } from './rag.service';
 import { PromptsService } from '../prompts/prompts.service';
+import { CrisisDetectionService, CrisisLevel } from './crisis-detection.service';
+import { ContentModerationService, ModerationAction } from './content-moderation.service';
 
 @Injectable()
 export class ChatService {
@@ -35,6 +37,8 @@ export class ChatService {
     private configService: ConfigService,
     private ragService: RAGService,
     private promptsService: PromptsService,
+    private crisisDetectionService: CrisisDetectionService,
+    private contentModerationService: ContentModerationService,
     @Inject(CACHE_MANAGER) private cacheManager: Cache,
   ) {
     // Get AI provider from config
@@ -62,6 +66,57 @@ export class ChatService {
       throw new Error('User not found');
     }
 
+    // STEP 1: Validate and sanitize input
+    const validation = this.contentModerationService.validateInput(content);
+    if (!validation.valid) {
+      this.logger.warn(`INPUT_VALIDATION_FAILED for user ${userId}`, { issues: validation.issues });
+      throw new BadRequestException(`Invalid message: ${validation.issues.join(', ')}`);
+    }
+
+    // Use sanitized content from here on
+    const sanitizedContent = validation.sanitized;
+
+    // STEP 2: Content moderation check
+    const moderation = await this.contentModerationService.moderateInput(sanitizedContent);
+
+    if (moderation.action === ModerationAction.BLOCK) {
+      this.logger.error(`INPUT_BLOCKED for user ${userId}`, {
+        reason: moderation.reason,
+        categories: moderation.categories,
+      });
+
+      // Return safe alternative response instead of blocking
+      const safeResponse = this.contentModerationService.getSafeAlternativeResponse(moderation.reason);
+
+      // Still save the conversation but with moderated content
+      const conversation = await this.getOrCreateConversation(userId);
+
+      const botMessage = this.messageRepository.create({
+        conversation,
+        content: safeResponse,
+        senderType: SenderType.BOT,
+      });
+
+      return await this.messageRepository.save(botMessage);
+    }
+
+    if (moderation.action === ModerationAction.WARN) {
+      this.logger.warn(`INPUT_WARNING for user ${userId}`, {
+        reason: moderation.reason,
+        scores: moderation.categoryScores,
+      });
+    }
+
+    // STEP 3: Detect crisis situation
+    const crisisDetection = this.crisisDetectionService.detectCrisis(sanitizedContent);
+
+    if (crisisDetection.requiresIntervention) {
+      this.logger.error(`CRISIS DETECTED for user ${userId} - Level: ${crisisDetection.level}, Confidence: ${crisisDetection.confidence}`);
+
+      // Log crisis event for monitoring/alerting
+      this.logCrisisEvent(userId, sanitizedContent, crisisDetection);
+    }
+
     // Check if we need to update user context (once per day on first conversation)
     if (this.shouldUpdateContext(user)) {
       // Generate context asynchronously without blocking the message flow
@@ -70,25 +125,47 @@ export class ChatService {
       );
     }
 
-    let conversation = await this.conversationRepository.findOne({
-      where: { user: { id: userId } },
-      order: { createdAt: 'DESC' },
-    });
+    // Get or create conversation
+    const conversation = await this.getOrCreateConversation(userId);
 
-    if (!conversation) {
-      conversation = this.conversationRepository.create({ user });
-      await this.conversationRepository.save(conversation);
-    }
-
+    // Save user message
     const userMessage = this.messageRepository.create({
       conversation,
-      content,
+      content: sanitizedContent,
       senderType: SenderType.USER,
     });
     await this.messageRepository.save(userMessage);
 
-    const botResponse = await this.generateBotResponse(user, content, conversation.id);
+    // STEP 4: Generate bot response with crisis context
+    let botResponse = await this.generateBotResponse(
+      user,
+      sanitizedContent,
+      conversation.id,
+      crisisDetection,
+    );
 
+    // STEP 5: Moderate AI output (critical safety check)
+    const outputModeration = await this.contentModerationService.moderateOutput(botResponse);
+
+    if (outputModeration.action === ModerationAction.BLOCK) {
+      this.logger.error(`OUTPUT_BLOCKED for user ${userId}`, {
+        reason: outputModeration.reason,
+        categories: outputModeration.categories,
+        responsePreview: botResponse.substring(0, 100),
+      });
+
+      // Replace with safe alternative
+      botResponse = this.contentModerationService.getSafeAlternativeResponse(outputModeration.reason);
+    }
+
+    if (outputModeration.action === ModerationAction.WARN) {
+      this.logger.warn(`OUTPUT_WARNING for user ${userId}`, {
+        reason: outputModeration.reason,
+        scores: outputModeration.categoryScores,
+      });
+    }
+
+    // Save bot message
     const botMessage = this.messageRepository.create({
       conversation,
       content: botResponse,
@@ -98,7 +175,7 @@ export class ChatService {
     const savedMessage = await this.messageRepository.save(botMessage);
 
     // Store embeddings for RAG (asynchronous, don't block response)
-    this.storeMessageEmbeddings(conversation.id, content, botResponse).catch(err =>
+    this.storeMessageEmbeddings(conversation.id, sanitizedContent, botResponse).catch(err =>
       this.logger.error('Failed to store message embeddings:', err)
     );
 
@@ -108,7 +185,48 @@ export class ChatService {
     return savedMessage;
   }
 
-  async generateBotResponse(user: User, message: string, conversationId: string): Promise<string> {
+  /**
+   * Get existing conversation or create new one
+   */
+  private async getOrCreateConversation(userId: string): Promise<Conversation> {
+    let conversation = await this.conversationRepository.findOne({
+      where: { user: { id: userId } },
+      order: { createdAt: 'DESC' },
+    });
+
+    if (!conversation) {
+      const user = await this.userRepository.findOne({ where: { id: userId } });
+      conversation = this.conversationRepository.create({ user });
+      await this.conversationRepository.save(conversation);
+    }
+
+    return conversation;
+  }
+
+  async generateBotResponse(
+    user: User,
+    message: string,
+    conversationId: string,
+    crisisDetection?: any,
+  ): Promise<string> {
+    // PRIORITY: Handle crisis immediately
+    if (crisisDetection?.requiresIntervention) {
+      const crisisResponse = this.crisisDetectionService.generateCrisisResponse(crisisDetection);
+      // Still generate personalized response, but prepend crisis resources
+      const context = await this.getUserContext(user, conversationId);
+      const systemPrompt = this.buildSystemPrompt(context, '', crisisDetection);
+
+      let aiResponse: string;
+      if (this.aiProvider === 'gemini') {
+        aiResponse = await this.generateGeminiResponse(systemPrompt, context, message);
+      } else {
+        aiResponse = await this.generateOpenAIResponse(systemPrompt, context, message);
+      }
+
+      // Combine crisis resources with AI response
+      return `${crisisResponse}\n\n${aiResponse}`;
+    }
+
     const context = await this.getUserContext(user, conversationId);
 
     // Get RAG context from conversation embeddings (configurable via ENABLE_RAG env var)
@@ -140,7 +258,7 @@ export class ChatService {
       console.log('RAG is disabled via ENABLE_RAG=false');
     }
 
-    const systemPrompt = this.buildSystemPrompt(context, ragContext.contextSummary);
+    const systemPrompt = this.buildSystemPrompt(context, ragContext.contextSummary, crisisDetection);
 
     // Route to appropriate AI provider
     if (this.aiProvider === 'gemini') {
@@ -307,7 +425,7 @@ export class ChatService {
     return context;
   }
 
-  private buildSystemPrompt(context: any, ragContext?: string): string {
+  private buildSystemPrompt(context: any, ragContext?: string, crisisDetection?: any): string {
     const angelPrompts = this.promptsService.getPrompts();
 
     let prompt = `${angelPrompts.angelRoleDescription}
@@ -323,13 +441,23 @@ export class ChatService {
       prompt += `    - Background: ${context.conversationContext}\n`;
     }
 
+    // CRITICAL: Add crisis protocol if crisis detected
+    if (crisisDetection?.requiresIntervention) {
+      prompt += `\n${angelPrompts.crisisProtocol}\n`;
+      prompt += `\n⚠️ ACTIVE CRISIS: Level ${crisisDetection.level}, Confidence: ${(crisisDetection.confidence * 100).toFixed(0)}%\n`;
+      prompt += `Emergency resources have already been provided to the user.\n`;
+    }
+
+    // Add safety guidelines
+    prompt += `\n${angelPrompts.safetyGuidelines}\n`;
+
     // Add RAG context if available
     if (ragContext && ragContext.trim().length > 0) {
       prompt += `\n${ragContext}\n`;
       prompt += angelPrompts.ragInstruction;
     }
 
-    prompt += angelPrompts.angelCoreGuidelines;
+    prompt += `\n${angelPrompts.angelCoreGuidelines}`;
     return prompt;
   }
 
@@ -482,6 +610,28 @@ Generate a comprehensive but concise summary:`;
       this.logger.error('Error generating user context:', error);
       // Don't throw - context generation should not block the chat
     }
+  }
+
+  /**
+   * Log crisis event for monitoring and potential intervention
+   */
+  private logCrisisEvent(userId: string, message: string, crisisDetection: any): void {
+    // Log with high severity for alerting systems
+    this.logger.error('CRISIS_EVENT', {
+      userId,
+      crisisLevel: crisisDetection.level,
+      confidence: crisisDetection.confidence,
+      matchedKeywords: crisisDetection.matchedKeywords,
+      timestamp: new Date().toISOString(),
+      // Don't log the actual message content for privacy, just metadata
+      messageLength: message.length,
+    });
+
+    // In production, this should:
+    // 1. Send to monitoring service (DataDog, Sentry, etc.)
+    // 2. Trigger alerts for human review
+    // 3. Store in audit log for compliance
+    // 4. Potentially notify emergency contacts if configured
   }
 
   /**

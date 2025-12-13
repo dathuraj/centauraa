@@ -111,6 +111,32 @@ Resources:
         - Key: Name
           Value: !Sub '${ProjectName}-${Environment}-backend-tg'
 
+  # Target Group for Weaviate
+  WeaviateTargetGroup:
+    Type: AWS::ElasticLoadBalancingV2::TargetGroup
+    Properties:
+      Name: !Sub '${ProjectName}-${Environment}-weaviate-tg'
+      Port: 8080
+      Protocol: HTTP
+      TargetType: ip
+      VpcId:
+        Fn::ImportValue: !Sub '${ProjectName}-${Environment}-VpcId'
+      HealthCheckEnabled: true
+      HealthCheckProtocol: HTTP
+      HealthCheckPath: /v1/.well-known/ready
+      HealthCheckIntervalSeconds: 30
+      HealthCheckTimeoutSeconds: 5
+      HealthyThresholdCount: 2
+      UnhealthyThresholdCount: 3
+      Matcher:
+        HttpCode: '200'
+      TargetGroupAttributes:
+        - Key: deregistration_delay.timeout_seconds
+          Value: '30'
+      Tags:
+        - Key: Name
+          Value: !Sub '${ProjectName}-${Environment}-weaviate-tg'
+
   # HTTP Listener (default forwards to backend)
   HTTPListener:
     Type: AWS::ElasticLoadBalancingV2::Listener
@@ -121,6 +147,21 @@ Resources:
       DefaultActions:
         - Type: forward
           TargetGroupArn: !Ref BackendTargetGroup
+
+  # Listener Rule for Weaviate - COMMENTED OUT for security
+  # Weaviate should only be accessible internally via service discovery
+  # WeaviateListenerRule:
+  #   Type: AWS::ElasticLoadBalancingV2::ListenerRule
+  #   Properties:
+  #     ListenerArn: !Ref HTTPListener
+  #     Priority: 1
+  #     Conditions:
+  #       - Field: path-pattern
+  #         Values:
+  #           - '/v1/*'
+  #     Actions:
+  #       - Type: forward
+  #         TargetGroupArn: !Ref WeaviateTargetGroup
 
   # =========================================================================
   # SSL/HTTPS Configuration (uncomment when you have an ACM certificate)
@@ -203,8 +244,8 @@ Outputs:
     Export:
       Name: !Sub '${ProjectName}-${Environment}-BackendTargetGroupArn'
 
-  # WeaviateTargetGroupArn:
-  #   Description: ARN of the Weaviate target group
-  #   Value: !Ref WeaviateTargetGroup
-  #   Export:
-  #     Name: !Sub '${ProjectName}-${Environment}-WeaviateTargetGroupArn'
+  WeaviateTargetGroupArn:
+    Description: ARN of the Weaviate target group
+    Value: !Ref WeaviateTargetGroup
+    Export:
+      Name: !Sub '${ProjectName}-${Environment}-WeaviateTargetGroupArn'

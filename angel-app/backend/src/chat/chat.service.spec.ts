@@ -6,6 +6,8 @@ import { ConfigService } from '@nestjs/config';
 import { ChatService } from './chat.service';
 import { RAGService } from './rag.service';
 import { PromptsService } from '../prompts/prompts.service';
+import { CrisisDetectionService, CrisisLevel } from './crisis-detection.service';
+import { ContentModerationService, ModerationAction } from './content-moderation.service';
 import { Conversation } from '../entities/conversation.entity';
 import { Message, SenderType } from '../entities/message.entity';
 import { User } from '../entities/user.entity';
@@ -84,6 +86,38 @@ describe('ChatService', () => {
     storeEmbedding: jest.fn(),
   };
 
+  const mockCrisisDetectionService = {
+    detectCrisis: jest.fn().mockReturnValue({
+      level: CrisisLevel.NONE,
+      confidence: 0,
+      matchedKeywords: [],
+      requiresIntervention: false,
+      emergencyResources: [],
+    }),
+    generateCrisisResponse: jest.fn().mockReturnValue(''),
+  };
+
+  const mockContentModerationService = {
+    validateInput: jest.fn().mockReturnValue({
+      valid: true,
+      sanitized: 'test message',
+      issues: [],
+    }),
+    moderateInput: jest.fn().mockResolvedValue({
+      flagged: false,
+      categories: {},
+      categoryScores: {},
+      action: ModerationAction.ALLOW,
+    }),
+    moderateOutput: jest.fn().mockResolvedValue({
+      flagged: false,
+      categories: {},
+      categoryScores: {},
+      action: ModerationAction.ALLOW,
+    }),
+    getSafeAlternativeResponse: jest.fn().mockReturnValue('Safe response'),
+  };
+
   beforeEach(async () => {
     const module: TestingModule = await Test.createTestingModule({
       providers: [
@@ -144,8 +178,18 @@ describe('ChatService', () => {
               angelCoreGuidelines: 'Be helpful and empathetic',
               angelRoleDescription: 'You are Angel, a supportive mental health companion',
               ragInstruction: 'Use context to provide personalized responses',
+              crisisProtocol: 'Crisis response protocol',
+              safetyGuidelines: 'Safety guidelines',
             }),
           },
+        },
+        {
+          provide: CrisisDetectionService,
+          useValue: mockCrisisDetectionService,
+        },
+        {
+          provide: ContentModerationService,
+          useValue: mockContentModerationService,
         },
       ],
     }).compile();

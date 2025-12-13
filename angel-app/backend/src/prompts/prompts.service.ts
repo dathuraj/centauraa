@@ -7,6 +7,8 @@ export interface AngelPrompts {
   angelCoreGuidelines: string;
   angelRoleDescription: string;
   ragInstruction: string;
+  crisisProtocol: string;
+  safetyGuidelines: string;
 }
 
 @Injectable()
