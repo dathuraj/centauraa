@@ -196,6 +196,9 @@ export class ChatService {
 
     if (!conversation) {
       const user = await this.userRepository.findOne({ where: { id: userId } });
+      if (!user) {
+        throw new Error(`User with id ${userId} not found`);
+      }
       conversation = this.conversationRepository.create({ user });
       await this.conversationRepository.save(conversation);
     }
