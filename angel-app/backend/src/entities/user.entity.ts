@@ -31,10 +31,10 @@ export class User {
   isVerified: boolean;
 
   @Column({ type: 'text', nullable: true })
-  conversationContext: string;
+  clinicalProfile: string;
 
   @Column({ type: 'timestamp', nullable: true })
-  contextUpdatedAt: Date;
+  clinicalProfileUpdatedAt: Date;
 
   @CreateDateColumn()
   createdAt: Date;

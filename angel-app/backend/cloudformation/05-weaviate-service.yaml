@@ -72,7 +72,7 @@ Resources:
     Properties:
       FileSystemId: !Ref WeaviateEFS
       SubnetId:
-        Fn::ImportValue: !Sub '${ProjectName}-${Environment}-PrivateSubnet1'
+        Fn::ImportValue: !Sub '${ProjectName}-${Environment}-PublicSubnet1'
       SecurityGroups:
         - !Ref EFSSecurityGroup
 
@@ -81,7 +81,7 @@ Resources:
     Properties:
       FileSystemId: !Ref WeaviateEFS
       SubnetId:
-        Fn::ImportValue: !Sub '${ProjectName}-${Environment}-PrivateSubnet2'
+        Fn::ImportValue: !Sub '${ProjectName}-${Environment}-PublicSubnet2'
       SecurityGroups:
         - !Ref EFSSecurityGroup
 
@@ -227,12 +227,12 @@ Resources:
       PlatformVersion: LATEST
       NetworkConfiguration:
         AwsvpcConfiguration:
-          AssignPublicIp: DISABLED
+          AssignPublicIp: ENABLED
           SecurityGroups:
             - Fn::ImportValue: !Sub '${ProjectName}-${Environment}-ECSTaskSG'
           Subnets:
-            - Fn::ImportValue: !Sub '${ProjectName}-${Environment}-PrivateSubnet1'
-            - Fn::ImportValue: !Sub '${ProjectName}-${Environment}-PrivateSubnet2'
+            - Fn::ImportValue: !Sub '${ProjectName}-${Environment}-PublicSubnet1'
+            - Fn::ImportValue: !Sub '${ProjectName}-${Environment}-PublicSubnet2'
       ServiceRegistries:
         - RegistryArn: !GetAtt WeaviateServiceDiscovery.Arn
       DeploymentConfiguration:

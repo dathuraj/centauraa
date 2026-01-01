@@ -1,8 +1,13 @@
 import axios from 'axios';
 import AsyncStorage from '@react-native-async-storage/async-storage';
 
-// AWS Application Load Balancer URL
-const API_URL = 'http://angel-backend-dev-alb-448499488.us-west-2.elb.amazonaws.com';
+// API URL Configuration
+// Local development: http://localhost:3000
+// iOS Simulator: http://localhost:3000
+// Android Emulator: http://10.0.2.2:3000
+// Physical Device: http://YOUR_COMPUTER_IP:3000 (e.g., http://192.168.1.100:3000)
+// AWS Production: http://angel-backend-dev-alb-448499488.us-west-2.elb.amazonaws.com
+const API_URL = 'http://localhost:3000';
 
 export const api = axios.create({
   baseURL: API_URL,
@@ -46,11 +51,17 @@ export const userAPI = {
 
 // Chat API
 export const chatAPI = {
-  sendMessage: (message: string) =>
-    api.post('/chat/send', { message }),
+  sendMessage: (message: string, conversationId?: string) =>
+    api.post('/chat/send', { message, conversationId }),
 
   getHistory: (limit?: number) =>
     api.get('/chat/history', { params: { limit } }),
+
+  getConversations: (limit?: number) =>
+    api.get('/chat/conversations', { params: { limit } }),
+
+  getConversation: (conversationId: string) =>
+    api.get(`/chat/conversations/${conversationId}`),
 };
 
 // Voice API

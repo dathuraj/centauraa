@@ -1,0 +1,21 @@
+# AI Therapist Context Management System
+# Python dependencies
+
+# Core Dependencies
+fastapi==0.104.1
+uvicorn[standard]==0.24.0
+psycopg2-binary==2.9.9
+weaviate-client==3.25.3
+python-dotenv==1.0.0
+
+# Type Hints & Validation
+pydantic==2.5.0
+
+# Utilities
+python-multipart==0.0.6
+
+# Optional: For production
+# gunicorn==21.2.0
+# redis==5.0.1
+# slowapi==0.1.9  # Rate limiting
+# prometheus-client==0.19.0  # Metrics

@@ -15,6 +15,7 @@ import { RAGService, RAGResult } from './rag.service';
 import { PromptsService } from '../prompts/prompts.service';
 import { CrisisDetectionService, CrisisLevel } from './crisis-detection.service';
 import { ContentModerationService, ModerationAction } from './content-moderation.service';
+import { TherapistContextService } from './therapist-context.service';
 
 @Injectable()
 export class ChatService {
@@ -39,6 +40,7 @@ export class ChatService {
     private promptsService: PromptsService,
     private crisisDetectionService: CrisisDetectionService,
     private contentModerationService: ContentModerationService,
+    private therapistContextService: TherapistContextService,
     @Inject(CACHE_MANAGER) private cacheManager: Cache,
   ) {
     // Get AI provider from config
@@ -59,7 +61,7 @@ export class ChatService {
     console.log(`ChatService initialized with AI provider: ${this.aiProvider}`);
   }
 
-  async sendMessage(userId: string, content: string): Promise<Message> {
+  async sendMessage(userId: string, content: string, conversationId?: string): Promise<Message> {
     const user = await this.userRepository.findOne({ where: { id: userId } });
 
     if (!user) {
@@ -89,7 +91,7 @@ export class ChatService {
       const safeResponse = this.contentModerationService.getSafeAlternativeResponse(moderation.reason);
 
       // Still save the conversation but with moderated content
-      const conversation = await this.getOrCreateConversation(userId);
+      const conversation = await this.getOrCreateConversation(userId, conversationId);
 
       const botMessage = this.messageRepository.create({
         conversation,
@@ -126,7 +128,7 @@ export class ChatService {
     }
 
     // Get or create conversation
-    const conversation = await this.getOrCreateConversation(userId);
+    const conversation = await this.getOrCreateConversation(userId, conversationId);
 
     // Save user message
     const userMessage = this.messageRepository.create({
@@ -179,6 +181,18 @@ export class ChatService {
       this.logger.error('Failed to store message embeddings:', err)
     );
 
+    // Auto-generate conversation title after first exchange (asynchronous)
+    const messageCount = await this.messageRepository.count({
+      where: { conversation: { id: conversation.id } },
+    });
+
+    if (messageCount === 2 && conversation.title === 'New Conversation') {
+      // First exchange complete, generate title
+      this.generateConversationTitle(conversation.id).catch(err =>
+        this.logger.error('Failed to generate conversation title:', err)
+      );
+    }
+
     // Invalidate caches after new message
     await this.invalidateUserCache(userId, conversation.id);
 
@@ -186,24 +200,33 @@ export class ChatService {
   }
 
   /**
-   * Get existing conversation or create new one
+   * Create a new conversation
+   * Note: Now creates a fresh conversation every time instead of reusing
    */
-  private async getOrCreateConversation(userId: string): Promise<Conversation> {
-    let conversation = await this.conversationRepository.findOne({
-      where: { user: { id: userId } },
-      order: { createdAt: 'DESC' },
-    });
+  private async getOrCreateConversation(userId: string, conversationId?: string): Promise<Conversation> {
+    // If conversationId is provided, use existing conversation
+    if (conversationId) {
+      const conversation = await this.conversationRepository.findOne({
+        where: { id: conversationId, user: { id: userId } },
+      });
 
-    if (!conversation) {
-      const user = await this.userRepository.findOne({ where: { id: userId } });
-      if (!user) {
-        throw new Error(`User with id ${userId} not found`);
+      if (conversation) {
+        return conversation;
       }
-      conversation = this.conversationRepository.create({ user });
-      await this.conversationRepository.save(conversation);
     }
 
-    return conversation;
+    // Always create a new conversation
+    const user = await this.userRepository.findOne({ where: { id: userId } });
+    if (!user) {
+      throw new Error(`User with id ${userId} not found`);
+    }
+
+    const conversation = this.conversationRepository.create({
+      user,
+      title: 'New Conversation', // Default title, will be updated after first exchange
+    });
+
+    return await this.conversationRepository.save(conversation);
   }
 
   async generateBotResponse(
@@ -277,7 +300,7 @@ export class ChatService {
     }
 
     try {
-      // Build messages for OpenAI format (no conversation history, using conversationContext instead)
+      // Build messages for OpenAI format (no conversation history, using clinicalProfile instead)
       const messages: OpenAI.Chat.ChatCompletionMessageParam[] = [
         {
           role: 'system',
@@ -339,7 +362,7 @@ export class ChatService {
         },
       });
 
-      // Start chat without history (using conversationContext instead)
+      // Start chat without history (using clinicalProfile instead)
       const chat = genModel.startChat({
         generationConfig: {
           temperature: 0.7,
@@ -389,18 +412,42 @@ export class ChatService {
 
     const startTime = Date.now();
 
-    // Fetch all data in parallel for speed
-    const [preferences, recentMoods, recentMessages] = await Promise.all([
+    // NEW: Build intelligent context using TherapistContextService
+    let therapistContext = '';
+    if (this.therapistContextService.isEnabled()) {
+      try {
+        const recentMessages = await this.messageRepository.find({
+          where: { conversation: { id: conversationId } },
+          order: { createdAt: 'ASC' },
+          take: 20,
+        });
+
+        const context = await this.therapistContextService.buildContext(
+          recentMessages,
+          user.id,
+          conversationId,
+          6000, // 6K token budget
+        );
+
+        therapistContext = context.formattedContext;
+
+        this.logger.log(
+          `Built therapist context in ${Date.now() - startTime}ms ` +
+          `(${context.tokenUsage.utilization}, ${context.recentHistoryCount} sessions, ` +
+          `${context.similarMomentsCount} similar moments)`
+        );
+      } catch (error) {
+        this.logger.warn('Failed to build therapist context:', error);
+      }
+    }
+
+    // Fetch other data
+    const [preferences, recentMoods] = await Promise.all([
       this.preferenceRepository.find({ where: { user } }),
       this.moodLogRepository.find({
         where: { user },
         order: { createdAt: 'DESC' },
         take: 7,
-      }),
-      this.messageRepository.find({
-        where: { conversation: { id: conversationId } },
-        order: { createdAt: 'ASC' },
-        take: 10, // Reduced from 20 to 10 for faster queries and less tokens
       }),
     ]);
 
@@ -408,7 +455,8 @@ export class ChatService {
 
     const context = {
       userName: user.name || 'Friend',
-      conversationContext: user.conversationContext || null,
+      clinicalProfile: user.clinicalProfile || null,
+      therapistContext, // NEW: Add intelligent context
       preferences: preferences.reduce((acc, pref) => {
         acc[pref.key] = pref.value;
         return acc;
@@ -418,8 +466,7 @@ export class ChatService {
         date: mood.createdAt,
         note: mood.note,
       })),
-      recentTopics: this.extractTopics(recentMessages),
-      recentMessages: recentMessages,
+      // Removed recentTopics and recentMessages - now in therapistContext
     };
 
     // Cache for 5 minutes
@@ -439,9 +486,14 @@ export class ChatService {
     - Preferences: ${JSON.stringify(context.preferences)}
 `;
 
-    // Add user's conversation context if available
-    if (context.conversationContext) {
-      prompt += `    - Background: ${context.conversationContext}\n`;
+    // Add user's clinical profile if available
+    if (context.clinicalProfile) {
+      prompt += `\n**Clinical Profile:**\n${context.clinicalProfile}\n`;
+    }
+
+    // NEW: Add intelligent therapist context
+    if (context.therapistContext && context.therapistContext.trim().length > 0) {
+      prompt += `\n${context.therapistContext}\n`;
     }
 
     // CRITICAL: Add crisis protocol if crisis detected
@@ -464,22 +516,113 @@ export class ChatService {
     return prompt;
   }
 
-
-  private extractTopics(messages: Message[]): string[] {
-    // Simple topic extraction - can be enhanced with NLP
-    const topics = new Set<string>();
-    const keywords = ['anxiety', 'depression', 'stress', 'work', 'relationship', 'family', 'sleep'];
-
-    messages.forEach(msg => {
-      const lowercaseContent = msg.content.toLowerCase();
-      keywords.forEach(keyword => {
-        if (lowercaseContent.includes(keyword)) {
-          topics.add(keyword);
-        }
-      });
+  /**
+   * Get all conversations for a user
+   */
+  async getConversations(userId: string, limit: number = 50): Promise<Conversation[]> {
+    const conversations = await this.conversationRepository.find({
+      where: { user: { id: userId } },
+      order: { createdAt: 'DESC' },
+      take: limit,
+      relations: ['messages'],
     });
 
-    return Array.from(topics);
+    return conversations;
+  }
+
+  /**
+   * Get a specific conversation with all its messages
+   */
+  async getConversation(userId: string, conversationId: string): Promise<Conversation | null> {
+    const conversation = await this.conversationRepository.findOne({
+      where: { id: conversationId, user: { id: userId } },
+      relations: ['messages'],
+    });
+
+    return conversation;
+  }
+
+  /**
+   * Auto-generate a title for a conversation based on its first few messages
+   */
+  async generateConversationTitle(conversationId: string): Promise<string> {
+    try {
+      // Get first 4 messages (2 exchanges)
+      const messages = await this.messageRepository.find({
+        where: { conversation: { id: conversationId } },
+        order: { createdAt: 'ASC' },
+        take: 4,
+      });
+
+      if (messages.length === 0) {
+        return 'New Conversation';
+      }
+
+      // Build conversation snippet
+      const snippet = messages
+        .map(msg => `${msg.senderType === SenderType.USER ? 'User' : 'Angel'}: ${msg.content}`)
+        .join('\n');
+
+      const titlePrompt = `Based on this conversation snippet, generate a short, descriptive title (3-6 words) that captures the main topic or theme:
+
+${snippet}
+
+Generate only the title, nothing else:`;
+
+      let title = '';
+
+      // Use the configured AI provider to generate title
+      if (this.aiProvider === 'gemini' && this.gemini) {
+        const model = this.gemini.getGenerativeModel({
+          model: this.configService.get('GEMINI_MODEL', 'gemini-1.5-flash'),
+        });
+
+        const result = await model.generateContent(titlePrompt);
+        title = result.response.text().trim();
+      } else if (this.openai) {
+        const completion = await this.openai.chat.completions.create({
+          model: this.configService.get('OPENAI_MODEL', 'gpt-4o-mini'),
+          messages: [
+            {
+              role: 'system',
+              content: 'You generate short, descriptive conversation titles.',
+            },
+            {
+              role: 'user',
+              content: titlePrompt,
+            },
+          ],
+          temperature: 0.7,
+          max_tokens: 20,
+        });
+
+        title = completion.choices[0].message.content?.trim() || '';
+      }
+
+      // Clean up title (remove quotes if present)
+      title = title.replace(/^["']|["']$/g, '');
+
+      // Limit to reasonable length
+      if (title.length > 60) {
+        title = title.substring(0, 57) + '...';
+      }
+
+      // Update conversation with the generated title
+      const conversation = await this.conversationRepository.findOne({
+        where: { id: conversationId },
+      });
+
+      if (conversation && title) {
+        conversation.title = title;
+        await this.conversationRepository.save(conversation);
+        this.logger.log(`Generated title for conversation ${conversationId}: "${title}"`);
+      }
+
+      return title || 'New Conversation';
+    } catch (error) {
+      this.logger.error('Error generating conversation title:', error);
+      return 'New Conversation';
+    }
   }
 
   async getChatHistory(userId: string, limit: number = 50): Promise<Message[]> {
@@ -515,11 +658,11 @@ export class ChatService {
 
   // Check if user context needs updating (once per day)
   private shouldUpdateContext(user: User): boolean {
-    if (!user.contextUpdatedAt) {
+    if (!user.clinicalProfileUpdatedAt) {
       return true; // Never been updated
     }
 
-    const lastUpdate = new Date(user.contextUpdatedAt);
+    const lastUpdate = new Date(user.clinicalProfileUpdatedAt);
     const now = new Date();
     const hoursSinceUpdate = (now.getTime() - lastUpdate.getTime()) / (1000 * 60 * 60);
 
@@ -600,14 +743,16 @@ Generate a comprehensive but concise summary:`;
         contextSummary = completion.choices[0].message.content || '';
       }
 
-      // Update user's conversation context
+      // DEPRECATED: This method is being replaced by ClinicalProfileService
+      // which generates comprehensive clinical profiles on a monthly basis
+      // For now, we'll update the clinical profile here as a fallback
       if (contextSummary) {
-        user.conversationContext = contextSummary;
-        user.contextUpdatedAt = new Date();
+        user.clinicalProfile = contextSummary;
+        user.clinicalProfileUpdatedAt = new Date();
         await this.userRepository.save(user);
 
-        this.logger.log(`Context generated and saved for user ${user.id}`);
-        this.logger.log(`Generated Context:\n${contextSummary}`);
+        this.logger.log(`Clinical profile generated and saved for user ${user.id}`);
+        this.logger.log(`Generated Profile:\n${contextSummary}`);
       }
     } catch (error) {
       this.logger.error('Error generating user context:', error);

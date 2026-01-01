@@ -30,16 +30,15 @@ describe('ChatService', () => {
     email: 'test@example.com',
     name: 'Test User',
     isVerified: true,
-    conversationContext: 'User is dealing with anxiety',
-    contextUpdatedAt: new Date(),
+    clinicalProfile: 'User is dealing with anxiety and work-related stress',
+    clinicalProfileUpdatedAt: new Date(),
     otp: null,
     otpExpiresAt: null,
     createdAt: new Date(),
+    updatedAt: new Date(),
     conversations: [],
-    preferences: [],
     moodLogs: [],
     medications: [],
-    medicationLogs: [],
   };
 
   const mockConversation: Conversation = {

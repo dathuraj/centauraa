@@ -5,6 +5,7 @@ import { chatAPI, voiceAPI } from '../services/api';
 import { Message } from '../types';
 import { Alert, KeyboardAvoidingView, Platform, ScrollView as RNScrollView, TextInput, StyleSheet, TouchableOpacity } from 'react-native';
 import { Audio } from 'expo-av';
+import { useRoute, useNavigation } from '@react-navigation/native';
 
 // Memoized Message Component to prevent unnecessary re-renders
 const MessageItem = memo(({ msg }: { msg: Message }) => (
@@ -26,6 +27,10 @@ const MessageItem = memo(({ msg }: { msg: Message }) => (
 ));
 
 export const ChatScreen = () => {
+  const route = useRoute();
+  const navigation = useNavigation();
+  const conversationId = (route.params as any)?.conversationId;
+
   const [messages, setMessages] = useState<Message[]>([]);
   const [inputText, setInputText] = useState('');
   const [loading, setLoading] = useState(false);
@@ -38,11 +43,17 @@ export const ChatScreen = () => {
   const hasLoadedHistory = useRef(false);
 
   useEffect(() => {
-    // Only load history once
-    if (!hasLoadedHistory.current) {
-      loadHistory();
-      hasLoadedHistory.current = true;
+    // Load conversation when conversationId changes
+    if (conversationId) {
+      loadConversation(conversationId);
+    } else {
+      // Clear messages for new conversation
+      setMessages([]);
     }
+    hasLoadedHistory.current = true;
+  }, [conversationId]);
+
+  useEffect(() => {
     setupAudio();
 
     return () => {
@@ -68,6 +79,18 @@ export const ChatScreen = () => {
       });
     } catch (error) {
       console.error('Failed to setup audio:', error);
+    }
+  };
+
+  const loadConversation = async (convId: string) => {
+    try {
+      const response = await chatAPI.getConversation(convId);
+      if (response.data.messages) {
+        setMessages(response.data.messages);
+      }
+    } catch (error) {
+      console.error('Failed to load conversation:', error);
+      Alert.alert('Error', 'Failed to load conversation');
     }
   };
 
@@ -99,7 +122,7 @@ export const ChatScreen = () => {
     setLoading(true);
 
     try {
-      const response = await chatAPI.sendMessage(userMessage);
+      const response = await chatAPI.sendMessage(userMessage, conversationId);
       setMessages((prev) => [...prev, response.data]);
     } catch (error: any) {
       Alert.alert('Error', 'Failed to send message');
@@ -108,7 +131,7 @@ export const ChatScreen = () => {
       setIsTyping(false);
       setLoading(false);
     }
-  }, [inputText]);
+  }, [inputText, conversationId]);
 
   const startRecording = async () => {
     try {
@@ -269,10 +292,6 @@ export const ChatScreen = () => {
           onContentSizeChange={scrollToEnd}
           keyboardShouldPersistTaps="handled"
           removeClippedSubviews={true}
-          maxToRenderPerBatch={10}
-          updateCellsBatchingPeriod={50}
-          initialNumToRender={20}
-          windowSize={21}
         >
           <VStack space={3}>
             {messages.map((msg) => (

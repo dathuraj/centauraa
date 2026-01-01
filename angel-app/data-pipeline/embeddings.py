@@ -11,6 +11,7 @@ import re
 from concurrent.futures import ThreadPoolExecutor, as_completed
 import hashlib
 from dotenv import load_dotenv
+import threading
 
 # Load environment variables from .env file
 load_dotenv()
@@ -79,7 +80,11 @@ BATCH_COMMIT_SIZE = int(os.getenv("BATCH_COMMIT_SIZE", "1000"))
 MAX_RETRIES = int(os.getenv("MAX_RETRIES", "3"))
 RETRY_DELAY = int(os.getenv("RETRY_DELAY", "5"))
 
-CHECKPOINT_FILE = "embeddings_ultra_checkpoint.txt"
+# MEMORY OPTIMIZATION: Process MongoDB documents in batches to avoid loading entire dataset
+MONGO_BATCH_SIZE = int(os.getenv("MONGO_BATCH_SIZE", "100"))  # Read this many conversations at a time
+
+# Checkpoint file (configurable to avoid conflicts with parallel runs)
+CHECKPOINT_FILE = os.getenv("CHECKPOINT_FILE", "embeddings_ultra_checkpoint.txt")
 
 # Filler words to remove (optional optimization)
 FILLER_WORDS = {
@@ -184,11 +189,46 @@ try:
                     index_filterable=False,
                     index_searchable=True  # Enable full-text search on content
                 ),
+                # Clinical Context Fields
                 Property(
-                    name='timestamp',
-                    data_type=DataType.NUMBER,
-                    description='Unix timestamp',
+                    name='crisisLevel',
+                    data_type=DataType.TEXT,
+                    description='Crisis level: none, low, medium, high',
+                    index_filterable=True,
+                    index_searchable=False
+                ),
+                Property(
+                    name='containsSuicidalContent',
+                    data_type=DataType.BOOL,
+                    description='Whether conversation contains suicidal content',
                     index_filterable=True
+                ),
+                Property(
+                    name='containsSelfHarmContent',
+                    data_type=DataType.BOOL,
+                    description='Whether conversation contains self-harm content',
+                    index_filterable=True
+                ),
+                Property(
+                    name='symptomsPresented',
+                    data_type=DataType.TEXT_ARRAY,
+                    description='List of symptoms discussed',
+                    index_filterable=True,
+                    index_searchable=True
+                ),
+                Property(
+                    name='copingStrategiesDiscussed',
+                    data_type=DataType.TEXT_ARRAY,
+                    description='List of coping strategies discussed',
+                    index_filterable=True,
+                    index_searchable=True
+                ),
+                Property(
+                    name='conversationOutcome',
+                    data_type=DataType.TEXT,
+                    description='Outcome: positive, neutral, negative',
+                    index_filterable=True,
+                    index_searchable=False
                 ),
             ]
         )
@@ -230,6 +270,8 @@ logger.info(f"Max batch size: {MAX_BATCH_SIZE} (larger = fewer API calls)")
 logger.info(f"Inter-batch delay: {INTER_BATCH_DELAY}s (prevents rate limits)")
 logger.info(f"Adaptive batch sizing: {ADAPTIVE_BATCH_SIZING}")
 logger.info(f"Parallel workers: {MAX_WORKERS}")
+logger.info(f"MongoDB batch size: {MONGO_BATCH_SIZE} (memory optimization)")
+logger.info(f"Batch commit size: {BATCH_COMMIT_SIZE}")
 logger.info(f"Text preprocessing: {REMOVE_FILLER_WORDS}")
 logger.info(f"HIPAA/PHI filtering: {REMOVE_HIPAA_KEYWORDS}")
 if REMOVE_HIPAA_KEYWORDS:
@@ -273,7 +315,7 @@ class RateLimitState:
 
 rate_limit_state = RateLimitState()
 
-# Global state for HIPAA redaction tracking
+# Global state for HIPAA redaction tracking (thread-safe)
 class HIPAARedactionStats:
     def __init__(self):
         self.ssn_count = 0
@@ -283,6 +325,14 @@ class HIPAARedactionStats:
         self.id_count = 0
         self.keyword_count = 0
         self.total_texts_processed = 0
+        self._lock = threading.Lock()  # Thread-safe counter updates
+
+    def increment(self, **kwargs):
+        """Thread-safe increment of counters"""
+        with self._lock:
+            for key, value in kwargs.items():
+                if hasattr(self, key):
+                    setattr(self, key, getattr(self, key) + value)
 
     def log_stats(self):
         """Log redaction statistics"""
@@ -316,20 +366,24 @@ def preprocess_text(text: str) -> str:
     """Remove PHI patterns while preserving case and semantic meaning"""
 
     if REMOVE_HIPAA_KEYWORDS:
-        hipaa_stats.total_texts_processed += 1
+        # Accumulate counts for thread-safe batch update
+        counts = {'total_texts_processed': 1}
 
         # Remove specific PHI patterns (case-insensitive but preserve rest of text)
         # SSN pattern: XXX-XX-XXXX
         text, ssn_count = re.subn(r'\b\d{3}-\d{2}-\d{4}\b', '[REDACTED_SSN]', text, flags=re.IGNORECASE)
-        hipaa_stats.ssn_count += ssn_count
+        if ssn_count > 0:
+            counts['ssn_count'] = ssn_count
 
         # Phone numbers: (XXX) XXX-XXXX or XXX-XXX-XXXX
         text, phone_count = re.subn(r'\b\(?\d{3}\)?[-.\s]?\d{3}[-.\s]?\d{4}\b', '[REDACTED_PHONE]', text)
-        hipaa_stats.phone_count += phone_count
+        if phone_count > 0:
+            counts['phone_count'] = phone_count
 
         # Email addresses
         text, email_count = re.subn(r'\b[A-Za-z0-9._%+-]+@[A-Za-z0-9.-]+\.[A-Z|a-z]{2,}\b', '[REDACTED_EMAIL]', text)
-        hipaa_stats.email_count += email_count
+        if email_count > 0:
+            counts['email_count'] = email_count
 
         # Dates ONLY when preceded by PHI context (DOB, date of birth, etc.)
         text, date_count = re.subn(
@@ -338,7 +392,8 @@ def preprocess_text(text: str) -> str:
             text,
             flags=re.IGNORECASE
         )
-        hipaa_stats.date_count += date_count
+        if date_count > 0:
+            counts['date_count'] = date_count
 
         # MRN/Patient ID with context-aware replacement
         text, id_count = re.subn(
@@ -347,14 +402,21 @@ def preprocess_text(text: str) -> str:
             text,
             flags=re.IGNORECASE
         )
-        hipaa_stats.id_count += id_count
+        if id_count > 0:
+            counts['id_count'] = id_count
 
         # Remove HIPAA keywords (case-insensitive, handle multi-word phrases)
+        total_kw_count = 0
         for keyword in HIPAA_KEYWORDS:
             # Handle multi-word phrases by replacing spaces with flexible whitespace
             pattern = r'\b' + re.escape(keyword).replace(' ', r'\s+') + r'\b'
             text, kw_count = re.subn(pattern, '[MEDICAL_TERM]', text, flags=re.IGNORECASE)
-            hipaa_stats.keyword_count += kw_count
+            total_kw_count += kw_count
+        if total_kw_count > 0:
+            counts['keyword_count'] = total_kw_count
+
+        # Thread-safe batch update of all counters
+        hipaa_stats.increment(**counts)
 
     # Optionally remove filler words (disabled by default for better semantic embeddings)
     if REMOVE_FILLER_WORDS:
@@ -463,6 +525,33 @@ def get_batch_embeddings(texts: List[str], retry_count: int = 0) -> List[List[fl
             logger.error(f"❌ Failed after {MAX_RETRIES} retries: {e}")
             raise
 
+class CheckpointWriter:
+    """Buffered checkpoint writer to reduce I/O overhead"""
+    def __init__(self, filename: str, buffer_size: int = 50):
+        self.filename = filename
+        self.buffer_size = buffer_size
+        self.buffer = []
+        self._lock = threading.Lock()
+
+    def save(self, call_id: str):
+        """Add to buffer and flush if needed"""
+        with self._lock:
+            self.buffer.append(call_id)
+            if len(self.buffer) >= self.buffer_size:
+                self._flush()
+
+    def _flush(self):
+        """Write buffer to file (must be called with lock held)"""
+        if self.buffer:
+            with open(self.filename, 'a') as f:
+                f.write('\n'.join(self.buffer) + '\n')
+            self.buffer = []
+
+    def flush(self):
+        """Public flush method with lock"""
+        with self._lock:
+            self._flush()
+
 def load_checkpoint() -> set:
     """Load processed conversation IDs"""
     if os.path.exists(CHECKPOINT_FILE):
@@ -471,11 +560,6 @@ def load_checkpoint() -> set:
         logger.info(f"Loaded checkpoint: {len(processed)} conversations processed")
         return processed
     return set()
-
-def save_checkpoint(call_id: str):
-    """Save checkpoint"""
-    with open(CHECKPOINT_FILE, 'a') as f:
-        f.write(f"{call_id}\n")
 
 def bulk_insert_embeddings(weaviate_client, batch_data: List[Tuple]):
     """Bulk insert embeddings into Weaviate (v4 API) - OPTIMIZED"""
@@ -486,7 +570,7 @@ def bulk_insert_embeddings(weaviate_client, batch_data: List[Tuple]):
         # Use batch insertion with context manager for better performance
         with collection.batch.dynamic() as batch:
             for data in batch_data:
-                conversation_id, turn_index, speaker, text_chunk, embedding = data
+                conversation_id, turn_index, speaker, text_chunk, embedding, crisis_level, contains_suicidal, contains_self_harm, symptoms, coping_strategies, outcome = data
 
                 batch.add_object(
                     properties={
@@ -494,7 +578,12 @@ def bulk_insert_embeddings(weaviate_client, batch_data: List[Tuple]):
                         'turnIndex': turn_index,
                         'speaker': speaker,
                         'textChunk': text_chunk,
-                        'timestamp': int(time.time())
+                        'crisisLevel': crisis_level,
+                        'containsSuicidalContent': contains_suicidal,
+                        'containsSelfHarmContent': contains_self_harm,
+                        'symptomsPresented': symptoms,
+                        'copingStrategiesDiscussed': coping_strategies,
+                        'conversationOutcome': outcome
                     },
                     vector=embedding
                 )
@@ -508,10 +597,19 @@ def bulk_insert_embeddings(weaviate_client, batch_data: List[Tuple]):
 
 def process_conversation(call_data: dict) -> Tuple[str, List[Tuple], int]:
     """Process a single conversation (thread-safe) - AGGREGATES TURNS BEFORE CHUNKING"""
-    call_id = str(call_data.get("call_id", call_data.get("_id")))
-    transcriptions = call_data.get("transcriptions", [])
+    call_id = str(call_data.get("conversationId", call_data.get("_id")))
+    messages = call_data.get("messages", [])
 
-    if not transcriptions:
+    # Extract clinical context
+    clinical_context = call_data.get("clinicalContext", {})
+    crisis_level = clinical_context.get("crisisLevel", "none")
+    contains_suicidal = clinical_context.get("containsSuicidalContent", False)
+    contains_self_harm = clinical_context.get("containsSelfHarmContent", False)
+    symptoms = clinical_context.get("symptomsPresented", [])
+    coping_strategies = clinical_context.get("copingStrategiesDiscussed", [])
+    outcome = call_data.get("conversationOutcome", "unknown")
+
+    if not messages:
         return call_id, [], 0
 
     # NEW APPROACH: Aggregate entire conversation into one text, then chunk
@@ -519,9 +617,12 @@ def process_conversation(call_data: dict) -> Tuple[str, List[Tuple], int]:
     conversation_text = []
     turn_metadata = []  # Track which turn each word belongs to
 
-    for turn_index, transcription in enumerate(transcriptions):
-        speaker = transcription.get("speaker", "unknown")
-        text = transcription.get("value", "").strip()
+    for turn_index, msg in enumerate(messages):
+        speaker = msg.get("speaker", "unknown")
+        # Map "user" to "Patient"
+        if speaker.lower() == "user":
+            speaker = "Patient"
+        text = msg.get("message", "").strip()
         if not text:
             continue
 
@@ -557,22 +658,44 @@ def process_conversation(call_data: dict) -> Tuple[str, List[Tuple], int]:
     all_chunks = []
     all_metadata = []
 
+    # Calculate word positions for each turn to map chunks back to turns
+    word_positions = []
+    cumulative_words = 0
+    for meta in turn_metadata:
+        word_count = meta['word_count']
+        word_positions.append({
+            'turn_index': meta['turn_index'],
+            'speaker': meta['speaker'],
+            'start_word': cumulative_words,
+            'end_word': cumulative_words + word_count
+        })
+        cumulative_words += word_count
+
     for chunk_index, chunk in enumerate(chunks):
         chunk_clean = chunk.strip()
         if chunk_clean and len(chunk_clean) >= 10:  # Require at least 10 chars
             all_chunks.append(chunk_clean)
 
-            # For metadata, use the first turn_index found in the chunk
-            # This helps with tracking where in the conversation this chunk came from
-            first_turn_in_chunk = 0
-            for meta in turn_metadata:
-                if meta['text'][:50] in chunk:  # Check if turn appears in chunk
-                    first_turn_in_chunk = meta['turn_index']
+            # Estimate which turn this chunk starts at based on word position
+            chunk_start_word = chunk_index * CHUNK_SIZE
+
+            # Find the turn that contains this chunk's starting position
+            turn_index_for_chunk = 0
+            speaker_for_chunk = 'MIXED'
+
+            for pos in word_positions:
+                if pos['start_word'] <= chunk_start_word < pos['end_word']:
+                    turn_index_for_chunk = pos['turn_index']
+                    speaker_for_chunk = pos['speaker']
                     break
+                elif chunk_start_word >= pos['end_word']:
+                    # Chunk starts after this turn
+                    turn_index_for_chunk = pos['turn_index']
+                    speaker_for_chunk = pos['speaker']
 
             all_metadata.append({
-                'turn_index': first_turn_in_chunk,
-                'speaker': 'MIXED',  # Chunks may span multiple speakers
+                'turn_index': turn_index_for_chunk,
+                'speaker': speaker_for_chunk if chunk_index == 0 or len(word_positions) == 1 else 'MIXED',
                 'chunk': chunk_clean,
                 'chunk_index': chunk_index
             })
@@ -598,7 +721,13 @@ def process_conversation(call_data: dict) -> Tuple[str, List[Tuple], int]:
                     metadata['turn_index'],
                     metadata['speaker'],
                     metadata['chunk'],
-                    embedding
+                    embedding,
+                    crisis_level,
+                    contains_suicidal,
+                    contains_self_harm,
+                    symptoms,
+                    coping_strategies,
+                    outcome
                 ))
         except Exception as e:
             logger.error(f"Error embedding conversation {call_id}: {e}")
@@ -607,36 +736,19 @@ def process_conversation(call_data: dict) -> Tuple[str, List[Tuple], int]:
     return call_id, insert_data, len(all_chunks)
 
 # ----------------- Main Processing -----------------
-# MongoDB filter from environment variables
-MONGO_FILTER_ORG_ID = os.getenv("MONGO_FILTER_ORG_ID")
-MONGO_FILTER_MIN_TRANSCRIPTIONS = int(os.getenv("MONGO_FILTER_MIN_TRANSCRIPTIONS", "0"))
-MONGO_FILTER_TIMESTAMP_GTE = os.getenv("MONGO_FILTER_TIMESTAMP_GTE")
-MONGO_FILTER_TIMESTAMP_LT = os.getenv("MONGO_FILTER_TIMESTAMP_LT")
 
 # Build filter dynamically
 mongo_filter = {}
 
-if MONGO_FILTER_MIN_TRANSCRIPTIONS > 0:
-    mongo_filter["$expr"] = {"$gt": [{"$size": "$transcriptions"}, MONGO_FILTER_MIN_TRANSCRIPTIONS]}
 
-if MONGO_FILTER_ORG_ID:
-    mongo_filter["organization_id"] = MONGO_FILTER_ORG_ID
-
-if MONGO_FILTER_TIMESTAMP_GTE or MONGO_FILTER_TIMESTAMP_LT:
-    timestamp_filter = {}
-    if MONGO_FILTER_TIMESTAMP_GTE:
-        timestamp_filter["$gte"] = MONGO_FILTER_TIMESTAMP_GTE
-    if MONGO_FILTER_TIMESTAMP_LT:
-        timestamp_filter["$lt"] = MONGO_FILTER_TIMESTAMP_LT
-    mongo_filter["timestamp"] = timestamp_filter
 
 logger.info(f"MongoDB filter: {mongo_filter if mongo_filter else 'None (processing all documents)'}")
 
 processed_ids = load_checkpoint()
+checkpoint_writer = CheckpointWriter(CHECKPOINT_FILE, buffer_size=50)  # Buffer 50 IDs before writing
 total_conversations = collection.count_documents(mongo_filter)
 
 logger.info(f"Total conversations matching filter: {total_conversations}")
-logger.info(f"Filter: organization_id=5d9d3389-29a4-4ea3-95cb-ac8a28ec8920, >10 transcriptions, date range")
 logger.info(f"Already processed: {len(processed_ids)}")
 logger.info(f"Remaining: {total_conversations - len(processed_ids)}")
 
@@ -647,79 +759,110 @@ api_calls_saved = 0
 start_time = time.time()
 
 try:
-    # Fetch conversations to process
-    conversations_to_process = []
+    # MEMORY OPTIMIZATION: Process in batches instead of loading all at once
+    logger.info("Processing conversations in batches to optimize memory usage...")
 
-    logger.info("Loading conversations from MongoDB...")
-    for call in collection.find(mongo_filter):
-        call_id = str(call.get("call_id", call.get("_id")))
+    # Create cursor for batched reading
+    mongo_cursor = collection.find(mongo_filter).batch_size(MONGO_BATCH_SIZE)
 
-        if call_id in processed_ids:
-            continue
-
-        # Skip if already has embeddings
-        if CHECK_EXISTING and check_embedding_exists(weaviate_client, call_id):
-            logger.debug(f"Skipping {call_id} - embeddings exist")
-            save_checkpoint(call_id)
-            api_calls_saved += 1
-            continue
-
-        conversations_to_process.append(call)
-
-    logger.info(f"Processing {len(conversations_to_process)} conversations")
-
-    if api_calls_saved > 0:
-        logger.info(f"💡 Skipped {api_calls_saved} conversations (already embedded)")
-
-    # Process conversations in parallel
+    # PERFORMANCE: Create ONE ThreadPoolExecutor and reuse it for all batches
     with ThreadPoolExecutor(max_workers=MAX_WORKERS) as executor:
-        futures = {executor.submit(process_conversation, call): call for call in conversations_to_process}
-
-        with tqdm(total=len(conversations_to_process), desc="Processing",
+        # Create progress bar for total conversations
+        with tqdm(total=total_conversations - len(processed_ids), desc="Processing",
                   unit="conv", mininterval=1.0) as pbar:
-            for future in as_completed(futures):
-                try:
-                    call_id, insert_data, chunk_count = future.result(timeout=300)  # 5 min timeout per conversation
 
-                    if insert_data:
-                        insert_buffer.extend(insert_data)
-                        total_chunks_processed += chunk_count
+            # Process conversations in batches
+            conversations_batch = []
 
-                    save_checkpoint(call_id)
-                    conversations_processed += 1
+            def process_batch(batch):
+                """Helper function to process a batch of conversations"""
+                futures = {executor.submit(process_conversation, c): c for c in batch}
 
-                    # Bulk commit
-                    if len(insert_buffer) >= BATCH_COMMIT_SIZE:
-                        logger.info(f"Committing batch of {len(insert_buffer)} embeddings...")
-                        bulk_insert_embeddings(weaviate_client, insert_buffer)
-                        insert_buffer = []
+                for future in as_completed(futures):
+                    try:
+                        call_id, insert_data, chunk_count = future.result(timeout=300)  # 5 min timeout
 
-                    # Update progress with stats
-                    pbar.set_postfix({
-                        'chunks': total_chunks_processed,
-                        'buffer': len(insert_buffer),
-                        'rate': f'{conversations_processed/(time.time()-start_time):.1f}/min' if conversations_processed > 0 else '0/min'
-                    })
+                        if insert_data:
+                            insert_buffer.extend(insert_data)
+                            nonlocal total_chunks_processed
+                            total_chunks_processed += chunk_count
+
+                        checkpoint_writer.save(call_id)
+                        processed_ids.add(call_id)  # Add to memory to avoid re-processing
+                        nonlocal conversations_processed
+                        conversations_processed += 1
+
+                        # Bulk commit to Weaviate
+                        if len(insert_buffer) >= BATCH_COMMIT_SIZE:
+                            logger.info(f"Committing batch of {len(insert_buffer)} embeddings to Weaviate...")
+                            bulk_insert_embeddings(weaviate_client, insert_buffer)
+                            insert_buffer.clear()
+
+                        # Update progress with stats
+                        pbar.set_postfix({
+                            'chunks': total_chunks_processed,
+                            'buffer': len(insert_buffer),
+                            'rate': f'{conversations_processed/(time.time()-start_time):.1f}/min' if conversations_processed > 0 else '0/min'
+                        })
+                        pbar.update(1)
+
+                    except TimeoutError:
+                        logger.error(f"Timeout processing conversation (exceeded 5 minutes)")
+                        pbar.update(1)
+                    except Exception as e:
+                        logger.error(f"Error processing conversation: {e}")
+                        import traceback
+                        traceback.print_exc()
+                        pbar.update(1)
+
+            for call in mongo_cursor:
+                call_id = str(call.get("conversationId", call.get("_id")))
+
+                # Skip if already processed
+                if call_id in processed_ids:
+                    continue
+
+                # Skip if already has embeddings
+                if CHECK_EXISTING and check_embedding_exists(weaviate_client, call_id):
+                    logger.debug(f"Skipping {call_id} - embeddings exist")
+                    checkpoint_writer.save(call_id)
+                    api_calls_saved += 1
+                    processed_ids.add(call_id)  # Add to memory to avoid re-checking
                     pbar.update(1)
+                    continue
 
-                except TimeoutError:
-                    logger.error(f"Timeout processing conversation (exceeded 5 minutes)")
-                    pbar.update(1)
-                except Exception as e:
-                    logger.error(f"Error processing conversation: {e}")
-                    import traceback
-                    traceback.print_exc()
-                    pbar.update(1)
+                conversations_batch.append(call)
+
+                # Process batch when it reaches MONGO_BATCH_SIZE
+                if len(conversations_batch) >= MONGO_BATCH_SIZE:
+                    logger.debug(f"Processing batch of {len(conversations_batch)} conversations...")
+                    process_batch(conversations_batch)
+                    # Clear batch to free memory
+                    conversations_batch = []
+
+            # Process remaining conversations in final batch
+            if conversations_batch:
+                logger.debug(f"Processing final batch of {len(conversations_batch)} conversations...")
+                process_batch(conversations_batch)
 
     # Final commit
     if insert_buffer:
         bulk_insert_embeddings(weaviate_client, insert_buffer)
         logger.info("Final batch committed")
 
+    # Flush any remaining checkpoints
+    checkpoint_writer.flush()
+    logger.info("Checkpoint buffer flushed")
+
+    if api_calls_saved > 0:
+        logger.info(f"💡 Skipped {api_calls_saved} conversations (already embedded)")
+
 except KeyboardInterrupt:
     logger.info("\n\nInterrupted. Progress saved to checkpoint.")
+    checkpoint_writer.flush()  # Ensure checkpoints are saved on interrupt
 except Exception as e:
     logger.error(f"Fatal error: {e}")
+    checkpoint_writer.flush()  # Ensure checkpoints are saved on error
 finally:
     mongo_client.close()
     weaviate_client.close()

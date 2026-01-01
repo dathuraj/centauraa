@@ -11,6 +11,7 @@ import { VoiceController } from './voice.controller';
 import { RAGService } from './rag.service';
 import { CrisisDetectionService } from './crisis-detection.service';
 import { ContentModerationService } from './content-moderation.service';
+import { TherapistContextService } from './therapist-context.service';
 import { Conversation } from '../entities/conversation.entity';
 import { Message } from '../entities/message.entity';
 import { User } from '../entities/user.entity';
@@ -48,6 +49,7 @@ import { WeaviateModule } from '../weaviate/weaviate.module';
     RAGService,
     CrisisDetectionService,
     ContentModerationService,
+    TherapistContextService,
   ],
   controllers: [ChatController, VoiceController],
 })
