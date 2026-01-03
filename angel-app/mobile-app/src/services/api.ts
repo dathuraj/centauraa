@@ -1,20 +1,14 @@
 import axios from 'axios';
 import AsyncStorage from '@react-native-async-storage/async-storage';
+import config from '../config/environment';
 
-// API URL Configuration
-// Local development: http://localhost:3000
-// iOS Simulator: http://localhost:3000
-// Android Emulator: http://10.0.2.2:3000
-// Physical Device: http://YOUR_COMPUTER_IP:3000 (e.g., http://192.168.1.100:3000)
-// AWS Production: http://angel-backend-dev-alb-448499488.us-west-2.elb.amazonaws.com
-const API_URL = 'http://localhost:3000';
-
+// API instance configured from environment
 export const api = axios.create({
-  baseURL: API_URL,
+  baseURL: config.apiUrl,
   headers: {
     'Content-Type': 'application/json',
   },
-  timeout: 30000, // 30 second timeout (increased for RAG queries)
+  timeout: config.apiTimeout,
 });
 
 // Request interceptor to add auth token
@@ -81,7 +75,7 @@ export const voiceAPI = {
 
     const token = await AsyncStorage.getItem('auth_token');
 
-    return axios.post(`${API_URL}/voice/message`, formData, {
+    return axios.post(`${config.apiUrl}/voice/message`, formData, {
       headers: {
         'Content-Type': 'multipart/form-data',
         Authorization: `Bearer ${token}`,
@@ -104,7 +98,7 @@ export const voiceAPI = {
 
     const token = await AsyncStorage.getItem('auth_token');
 
-    return axios.post(`${API_URL}/voice/transcribe`, formData, {
+    return axios.post(`${config.apiUrl}/voice/transcribe`, formData, {
       headers: {
         'Content-Type': 'multipart/form-data',
         Authorization: `Bearer ${token}`,
