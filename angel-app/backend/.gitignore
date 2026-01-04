@@ -6,6 +6,8 @@
 # Google Cloud credentials
 google-credentials.json
 *.json
+# Exception: Track prompt file
+!src/prompts/angel-system-prompt.json
 
 # Dependencies
 node_modules/
