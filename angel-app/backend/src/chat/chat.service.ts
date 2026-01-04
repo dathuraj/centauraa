@@ -555,12 +555,14 @@ export class ChatService {
    * Get all conversations for a user
    */
   async getConversations(userId: string, limit: number = 50): Promise<Conversation[]> {
-    const conversations = await this.conversationRepository.find({
-      where: { user: { id: userId } },
-      order: { createdAt: 'DESC' },
-      take: limit,
-      relations: ['messages'],
-    });
+    const conversations = await this.conversationRepository
+      .createQueryBuilder('conversation')
+      .leftJoinAndSelect('conversation.messages', 'message')
+      .where('conversation.userId = :userId', { userId })
+      .orderBy('conversation.createdAt', 'DESC')
+      .addOrderBy('message.createdAt', 'ASC')
+      .take(limit)
+      .getMany();
 
     return conversations;
   }
@@ -569,10 +571,13 @@ export class ChatService {
    * Get a specific conversation with all its messages
    */
   async getConversation(userId: string, conversationId: string): Promise<Conversation | null> {
-    const conversation = await this.conversationRepository.findOne({
-      where: { id: conversationId, user: { id: userId } },
-      relations: ['messages'],
-    });
+    const conversation = await this.conversationRepository
+      .createQueryBuilder('conversation')
+      .leftJoinAndSelect('conversation.messages', 'message')
+      .where('conversation.id = :conversationId', { conversationId })
+      .andWhere('conversation.userId = :userId', { userId })
+      .orderBy('message.createdAt', 'ASC')
+      .getOne();
 
     return conversation;
   }
