@@ -9,6 +9,12 @@ export interface AngelPrompts {
   ragInstruction: string;
   crisisProtocol: string;
   safetyGuidelines: string;
+  conversationStyle?: string;
+  therapeuticTechniques?: string;
+  clinicalProfileGuidance?: string;
+  outOfScopeHandling?: string;
+  progressTracking?: string;
+  boundariesReminder?: string;
 }
 
 @Injectable()

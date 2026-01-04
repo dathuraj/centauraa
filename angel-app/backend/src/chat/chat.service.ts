@@ -493,6 +493,10 @@ export class ChatService {
     // Add user's clinical profile if available
     if (context.clinicalProfile) {
       prompt += `\n**Clinical Profile:**\n${context.clinicalProfile}\n`;
+      // Add clinical profile guidance
+      if (angelPrompts.clinicalProfileGuidance) {
+        prompt += `${angelPrompts.clinicalProfileGuidance}\n`;
+      }
     }
 
     // NEW: Add intelligent therapist context
@@ -516,7 +520,34 @@ export class ChatService {
       prompt += angelPrompts.ragInstruction;
     }
 
+    // Add conversation style guidance
+    if (angelPrompts.conversationStyle) {
+      prompt += `\n${angelPrompts.conversationStyle}\n`;
+    }
+
+    // Add therapeutic techniques
+    if (angelPrompts.therapeuticTechniques) {
+      prompt += `\n${angelPrompts.therapeuticTechniques}\n`;
+    }
+
+    // Add out of scope handling
+    if (angelPrompts.outOfScopeHandling) {
+      prompt += `\n${angelPrompts.outOfScopeHandling}\n`;
+    }
+
+    // Add progress tracking guidance
+    if (angelPrompts.progressTracking) {
+      prompt += `\n${angelPrompts.progressTracking}\n`;
+    }
+
+    // Add core guidelines
     prompt += `\n${angelPrompts.angelCoreGuidelines}`;
+
+    // Add final boundaries reminder
+    if (angelPrompts.boundariesReminder) {
+      prompt += `\n${angelPrompts.boundariesReminder}`;
+    }
+
     return prompt;
   }
 
