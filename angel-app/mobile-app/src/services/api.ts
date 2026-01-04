@@ -3,6 +3,8 @@ import AsyncStorage from '@react-native-async-storage/async-storage';
 import config from '../config/environment';
 
 // API instance configured from environment
+console.log('🔧 Axios config - baseURL:', config.apiUrl, 'timeout:', config.apiTimeout);
+
 export const api = axios.create({
   baseURL: config.apiUrl,
   headers: {
@@ -18,9 +20,29 @@ api.interceptors.request.use(
     if (token) {
       config.headers.Authorization = `Bearer ${token}`;
     }
+    console.log('📡 Making request to:', config.baseURL + config.url);
     return config;
   },
   (error) => {
+    console.error('❌ Request error:', error);
+    return Promise.reject(error);
+  }
+);
+
+// Response interceptor for debugging
+api.interceptors.response.use(
+  (response) => {
+    console.log('✅ Response received from:', response.config.url, 'Status:', response.status);
+    return response;
+  },
+  (error) => {
+    console.error('❌ Response error:', error.message);
+    if (error.response) {
+      console.error('   Status:', error.response.status);
+      console.error('   Data:', error.response.data);
+    } else if (error.request) {
+      console.error('   No response received. Request was made but no response.');
+    }
     return Promise.reject(error);
   }
 );

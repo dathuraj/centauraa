@@ -176,6 +176,10 @@ export class ChatService {
 
     const savedMessage = await this.messageRepository.save(botMessage);
 
+    // Ensure conversation object is included in the response
+    // This allows the frontend to track the conversation ID
+    savedMessage.conversation = { id: conversation.id } as any;
+
     // Store embeddings for RAG (asynchronous, don't block response)
     this.storeMessageEmbeddings(conversation.id, sanitizedContent, botResponse).catch(err =>
       this.logger.error('Failed to store message embeddings:', err)

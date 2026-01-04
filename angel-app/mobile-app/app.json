@@ -22,6 +22,10 @@
         "NSMicrophoneUsageDescription": "AngelApp needs access to your microphone to enable voice conversations with your AI assistant.",
         "NSAppTransportSecurity": {
           "NSExceptionDomains": {
+            "localhost": {
+              "NSExceptionAllowsInsecureHTTPLoads": true,
+              "NSIncludesSubdomains": true
+            },
             "angel-backend-dev-alb-448499488.us-west-2.elb.amazonaws.com": {
               "NSExceptionAllowsInsecureHTTPLoads": true,
               "NSIncludesSubdomains": true

@@ -29,7 +29,7 @@ const MessageItem = memo(({ msg }: { msg: Message }) => (
 export const ChatScreen = () => {
   const route = useRoute();
   const navigation = useNavigation();
-  const conversationId = (route.params as any)?.conversationId;
+  const routeConversationId = (route.params as any)?.conversationId;
 
   const [messages, setMessages] = useState<Message[]>([]);
   const [inputText, setInputText] = useState('');
@@ -42,16 +42,21 @@ export const ChatScreen = () => {
   const scrollViewRef = useRef<RNScrollView>(null);
   const hasLoadedHistory = useRef(false);
 
+  // Track the active conversation ID
+  const [activeConversationId, setActiveConversationId] = useState<string | undefined>(routeConversationId);
+
   useEffect(() => {
-    // Load conversation when conversationId changes
-    if (conversationId) {
-      loadConversation(conversationId);
+    // Load conversation when routeConversationId changes
+    if (routeConversationId) {
+      setActiveConversationId(routeConversationId);
+      loadConversation(routeConversationId);
     } else {
-      // Clear messages for new conversation
+      // Clear messages and conversation ID for new conversation
       setMessages([]);
+      setActiveConversationId(undefined);
     }
     hasLoadedHistory.current = true;
-  }, [conversationId]);
+  }, [routeConversationId]);
 
   useEffect(() => {
     setupAudio();
@@ -122,8 +127,13 @@ export const ChatScreen = () => {
     setLoading(true);
 
     try {
-      const response = await chatAPI.sendMessage(userMessage, conversationId);
+      const response = await chatAPI.sendMessage(userMessage, activeConversationId);
       setMessages((prev) => [...prev, response.data]);
+
+      // Update the active conversation ID after first message
+      if (!activeConversationId && response.data.conversation?.id) {
+        setActiveConversationId(response.data.conversation.id);
+      }
     } catch (error: any) {
       Alert.alert('Error', 'Failed to send message');
       console.error(error);
@@ -131,7 +141,7 @@ export const ChatScreen = () => {
       setIsTyping(false);
       setLoading(false);
     }
-  }, [inputText, conversationId]);
+  }, [inputText, activeConversationId]);
 
   const startRecording = async () => {
     try {
