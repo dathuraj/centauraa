@@ -1,6 +1,6 @@
 import { Injectable } from '@nestjs/common';
 import { ConfigService } from '@nestjs/config';
-import OpenAI from 'openai';
+import OpenAI, { toFile } from 'openai';
 import * as textToSpeech from '@google-cloud/text-to-speech';
 import * as speech from '@google-cloud/speech';
 
@@ -175,14 +175,11 @@ export class VoiceService {
 
       console.log(`[Whisper STT] Sending to Whisper with file type: ${extension}`);
 
-      // OpenAI Node.js SDK can work with buffers if we cast them properly
-      // Create a file-like object using the toFile helper or by casting
-      const fileData = audioBuffer as any;
-      fileData.name = `audio.${extension}`;
-      fileData.type = mimeType;
+      // Use OpenAI's toFile utility to properly create a file object from the buffer
+      const file = await toFile(audioBuffer, `audio.${extension}`, { type: mimeType });
 
       const transcription = await this.openai.audio.transcriptions.create({
-        file: fileData,
+        file: file,
         model: 'whisper-1',
         language: 'en',
         response_format: 'text',
